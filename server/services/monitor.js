@@ -118,7 +118,13 @@ class MonitorService {
 
         // ── Generate AI reply (only if autoReply enabled) ───────────────
         if (source.skill?.autoReply) {
-          const replyTo = source.skill.replyTo || ['*']
+          const rawReplyTo = source.skill.replyTo || ['*']
+          // Flatten: support both ["a","b"] and ["a；b；c"] (semicolon-separated from frontend)
+          const replyTo = rawReplyTo.flatMap(r =>
+            r.includes('；') || r.includes(';')
+              ? r.split(/[；;]/).map(s => s.trim()).filter(Boolean)
+              : [r]
+          )
           const shouldReply = replyTo.includes('*') || replyTo.includes(msg.sender)
 
           if (shouldReply) {
