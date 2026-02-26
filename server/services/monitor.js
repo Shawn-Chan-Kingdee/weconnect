@@ -18,6 +18,9 @@ class MonitorService {
     this.pollInterval = null
     this.wsClients = new Set()
     this.pollIntervalMs = 5000
+    this.pollCount = 0            // tracks poll rounds
+    this.fullScanEvery = 6        // full scan every N polls (~30s)
+    this.RECENT_MSG_COUNT = 15    // how many recent messages to check per scan
   }
 
   addWSClient(ws) {
@@ -50,6 +53,7 @@ class MonitorService {
 
   async _poll() {
     if (!this.isRunning) return
+    this.pollCount++
 
     try {
       const loginStatus = await browserService.checkLoginStatus()
@@ -59,58 +63,78 @@ class MonitorService {
       }
 
       const sources = sourcesDB.findAll().filter(s => s.enabled !== false)
-      if (sources.length === 0) {
-        console.log('[Monitor] No sources configured')
-        return
-      }
+      if (sources.length === 0) return
 
       const sourceNames = sources.map(s => s.name)
-      const chatsWithNew = await browserService.checkNewMessages(sourceNames)
+      const isFullScan = (this.pollCount % this.fullScanEvery === 0)
 
-      if (chatsWithNew.length === 0) return
+      // ── Phase 1: Quick check — find chats with unread badges ─────────
+      const chatsWithUnread = await browserService.checkNewMessages(sourceNames)
+      const urgentNames = new Set(chatsWithUnread.map(c => c.name))
 
-      for (const chat of chatsWithNew) {
-        // Fuzzy match: allow partial name match
-        const source = sources.find(s =>
-          s.name === chat.name ||
-          chat.name.includes(s.name) ||
-          s.name.includes(chat.name)
+      // ── Phase 2: Build processing list ───────────────────────────────
+      // Always process chats with unread; on full-scan rounds, process ALL sources
+      let toProcess = []
+
+      for (const source of sources) {
+        const hasUnread = chatsWithUnread.find(c =>
+          c.name === source.name || c.name.includes(source.name) || source.name.includes(c.name)
         )
-        if (source) {
-          await this._processNewMessages(chat, source)
+        if (hasUnread) {
+          toProcess.push({ source, reason: 'unread', unread: hasUnread.unread })
+        } else if (isFullScan) {
+          toProcess.push({ source, reason: 'fullscan', unread: 0 })
         }
+      }
+
+      if (toProcess.length === 0) return
+
+      if (isFullScan) {
+        console.log(`[Monitor] Full scan #${this.pollCount}: ${toProcess.length} sources`)
+      }
+
+      // ── Phase 3: Process each source ─────────────────────────────────
+      let didOpenChat = false
+      for (const { source, reason, unread } of toProcess) {
+        const found = await this._scanSource(source, unread)
+        if (found > 0) didOpenChat = true
+      }
+
+      // ── Phase 4: Navigate away so future messages get unread badges ──
+      if (didOpenChat) {
+        await browserService.navigateAway()
       }
     } catch (err) {
       console.error('[Monitor] Poll error:', err)
     }
   }
 
-  async _processNewMessages(chat, source) {
+  /**
+   * Scan a single source for new messages.
+   * Always reads the last RECENT_MSG_COUNT messages and uses dedup to find new ones.
+   * Returns number of new messages processed.
+   */
+  async _scanSource(source, hintUnread) {
     try {
-      console.log(`[Monitor] Processing "${chat.name}" (unread: ${chat.unread})`)
+      const messages = await browserService.getMessages(source.name)
+      if (!messages || messages.length === 0) return 0
 
-      const messages = await browserService.getMessages(chat.name)
-      if (!messages || messages.length === 0) {
-        console.log(`[Monitor] No messages loaded for "${chat.name}"`)
-        return
-      }
-
-      // Get new messages from others (last N based on unread count)
+      // Take the last N messages from others — do NOT rely solely on unread count
       const otherMessages = messages.filter(m => m.type === 'other')
-      const newMessages = otherMessages.slice(-Math.max(chat.unread, 1))
-      console.log(`[Monitor] ${otherMessages.length} msgs from others, processing last ${newMessages.length}`)
+      const scanCount = Math.max(this.RECENT_MSG_COUNT, hintUnread || 0)
+      const recentMessages = otherMessages.slice(-scanCount)
 
-      for (const msg of newMessages) {
+      let newCount = 0
+
+      for (const msg of recentMessages) {
         if (!msg.content) continue
 
         // ── Deduplication (consistent key length) ──────────────────────
         const dedupKey = msg.content.substring(0, DEDUP_LEN)
         const existing = messagesDB.findOne({ sourceName: source.name, dedupKey, processed: true })
-        if (existing) {
-          console.log(`[Monitor] Duplicate skipped: "${dedupKey.substring(0, 30)}"`)
-          continue
-        }
+        if (existing) continue  // already processed, skip silently
 
+        newCount++
         console.log(`[Monitor] New msg from ${msg.sender}: "${msg.content.substring(0, 60)}"`)
 
         const today = new Date().toISOString().split('T')[0]
@@ -215,8 +239,14 @@ class MonitorService {
           this.broadcast('new_todo', { sourceName: source.name, content: aiResult.todoSummary })
         }
       }
+
+      if (newCount > 0) {
+        console.log(`[Monitor] Processed ${newCount} new message(s) from "${source.name}"`)
+      }
+      return newCount
     } catch (err) {
-      console.error('[Monitor] _processNewMessages error:', err)
+      console.error('[Monitor] _scanSource error:', err)
+      return 0
     }
   }
 

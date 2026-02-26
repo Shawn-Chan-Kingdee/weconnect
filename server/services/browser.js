@@ -296,6 +296,32 @@ class BrowserService {
     }
   }
 
+  /**
+   * Navigate away from the current chat so that future incoming messages
+   * will show the unread badge. Without this, WeChat Web auto-reads
+   * messages in the currently-viewed chat.
+   */
+  async navigateAway() {
+    if (!this.page) return
+    try {
+      // Strategy 1: Click on "文件传输助手" (File Transfer) — always exists, safe
+      const fileHelper = this.page.locator('.chat_item').filter({ hasText: '文件传输助手' }).first()
+      if (await fileHelper.count() > 0) {
+        await fileHelper.click()
+        await this.page.waitForTimeout(300)
+        console.log('[Browser] Navigated away to 文件传输助手')
+        return
+      }
+
+      // Strategy 2: Press Escape to close/deselect current chat
+      await this.page.keyboard.press('Escape')
+      await this.page.waitForTimeout(200)
+      console.log('[Browser] Navigated away via Escape')
+    } catch (err) {
+      console.error('[Browser] navigateAway error:', err.message)
+    }
+  }
+
   async close() {
     try {
       if (this.context) await this.context.close()
