@@ -1,11 +1,20 @@
 /**
  * Settings & Sources Routes
+ * Simplified skill structure: prompt whiteboard replaces templates/keywords
  */
 import { Router } from 'express'
 import { v4 as uuidv4 } from 'uuid'
 import { sourcesDB, settingsDB } from '../db.js'
 
 const router = Router()
+
+const DEFAULT_SKILL = {
+  autoReply: false,
+  replyTo: ['*'],
+  prompt: '',        // System prompt / skill whiteboard — user writes their own instructions
+  terminology: {},   // Optional term substitutions
+  mcpService: null
+}
 
 // Get all message sources
 router.get('/sources', (req, res) => {
@@ -25,7 +34,6 @@ router.post('/sources', (req, res) => {
     return res.status(400).json({ error: '名称不能为空' })
   }
 
-  // Check duplicate
   if (existing.find(s => s.name === name)) {
     return res.status(400).json({ error: `消息来源 "${name}" 已存在` })
   }
@@ -33,25 +41,7 @@ router.post('/sources', (req, res) => {
   const source = sourcesDB.insert({
     id: uuidv4(),
     name,
-    skill: skill || {
-      autoReply: false,
-      replyTo: ['*'],
-      tone: '专业友好',
-      attitude: '积极主动',
-      terminology: {},
-      replyTemplates: {
-        daily: '收到，谢谢！',
-        business: '收到您的咨询，我会尽快处理。',
-        followup: '好的，我确认进度后回复您。',
-        newItem: '已记录，我会尽快安排。'
-      },
-      classifyKeywords: {
-        business: ['报价', '合同', '方案', '需求'],
-        followup: ['进度', '跟进', '状态', '完成'],
-        newItem: ['新项目', '安排', '登记', '新需求']
-      },
-      mcpService: null
-    },
+    skill: { ...DEFAULT_SKILL, ...(skill || {}) },
     enabled: true
   })
 

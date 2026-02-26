@@ -1,14 +1,16 @@
 /**
- * Message Monitor Service (Enhanced)
- * - AI-powered classification (with keyword fallback)
- * - Category-specific reply strategies via AI
- * - Structured todo generation from AI output
- * - Recent message context for better replies
+ * Message Monitor Service (Simplified)
+ * - No category classification — AI uses skill.prompt directly
+ * - Fixed deduplication key consistency
+ * - Records messages even when autoReply is off (monitoring-only mode)
+ * - Detailed logging for diagnosis
  */
 import { v4 as uuidv4 } from 'uuid'
 import browserService from './browser.js'
 import aiService from './ai.js'
 import { sourcesDB, messagesDB, todosDB } from '../db.js'
+
+const DEDUP_LEN = 80 // chars used for dedup key — must be consistent
 
 class MonitorService {
   constructor() {
@@ -51,16 +53,32 @@ class MonitorService {
 
     try {
       const loginStatus = await browserService.checkLoginStatus()
-      if (!loginStatus.loggedIn) return
+      if (!loginStatus.loggedIn) {
+        console.log('[Monitor] Not logged in, skipping poll')
+        return
+      }
 
-      const sources = sourcesDB.findAll()
-      if (sources.length === 0) return
+      const sources = sourcesDB.findAll().filter(s => s.enabled !== false)
+      if (sources.length === 0) {
+        console.log('[Monitor] No sources configured')
+        return
+      }
 
       const sourceNames = sources.map(s => s.name)
       const chatsWithNew = await browserService.checkNewMessages(sourceNames)
 
+      if (chatsWithNew.length === 0) return
+
       for (const chat of chatsWithNew) {
-        await this._processNewMessages(chat, sources.find(s => s.name === chat.name))
+        // Fuzzy match: allow partial name match
+        const source = sources.find(s =>
+          s.name === chat.name ||
+          chat.name.includes(s.name) ||
+          s.name.includes(chat.name)
+        )
+        if (source) {
+          await this._processNewMessages(chat, source)
+        }
       }
     } catch (err) {
       console.error('[Monitor] Poll error:', err)
@@ -68,196 +86,175 @@ class MonitorService {
   }
 
   async _processNewMessages(chat, source) {
-    if (!source) return
-
     try {
-      // Open the chat and read messages
-      const messages = await browserService.getMessages(chat.name)
-      if (!messages || messages.length === 0) return
+      console.log(`[Monitor] Processing "${chat.name}" (unread: ${chat.unread})`)
 
-      // Get the latest unread messages from others
-      const newMessages = messages.filter(m => m.type === 'other').slice(-chat.unread)
+      const messages = await browserService.getMessages(chat.name)
+      if (!messages || messages.length === 0) {
+        console.log(`[Monitor] No messages loaded for "${chat.name}"`)
+        return
+      }
+
+      // Get new messages from others (last N based on unread count)
+      const otherMessages = messages.filter(m => m.type === 'other')
+      const newMessages = otherMessages.slice(-Math.max(chat.unread, 1))
+      console.log(`[Monitor] ${otherMessages.length} msgs from others, processing last ${newMessages.length}`)
 
       for (const msg of newMessages) {
-        // Check if already processed
-        const existing = messagesDB.findOne({
-          sourceName: chat.name,
-          senderContent: msg.content?.substring(0, 50),
-          processed: true
-        })
-        if (existing) continue
+        if (!msg.content) continue
 
-        // Step 1: AI Classification (with keyword fallback)
-        const category = await aiService.classifyMessage(msg.content, source.skill)
+        // ── Deduplication (consistent key length) ──────────────────────
+        const dedupKey = msg.content.substring(0, DEDUP_LEN)
+        const existing = messagesDB.findOne({ sourceName: source.name, dedupKey, processed: true })
+        if (existing) {
+          console.log(`[Monitor] Duplicate skipped: "${dedupKey.substring(0, 30)}"`)
+          continue
+        }
 
-        // Step 2: Get recent messages for context
-        const recentMessages = messages.slice(-10) // last 10 messages for context
+        console.log(`[Monitor] New msg from ${msg.sender}: "${msg.content.substring(0, 60)}"`)
 
-        // Step 3: Generate reply with category-specific strategy
-        const aiResult = await this._generateReply(msg, source, category, recentMessages)
-
-        // Step 4: Build and save the record
         const today = new Date().toISOString().split('T')[0]
+        let aiResult = { text: '', todoSummary: null }
+
+        // ── Generate AI reply (only if autoReply enabled) ───────────────
+        if (source.skill?.autoReply) {
+          const replyTo = source.skill.replyTo || ['*']
+          const shouldReply = replyTo.includes('*') || replyTo.includes(msg.sender)
+
+          if (shouldReply) {
+            aiResult = await aiService.generateReply({
+              message: msg.content,
+              sender: msg.sender,
+              sourceName: source.name,
+              skill: source.skill,
+              recentMessages: messages.slice(-10)
+            })
+            console.log(`[Monitor] AI reply: "${aiResult.text?.substring(0, 60)}"`)
+          } else {
+            console.log(`[Monitor] Sender "${msg.sender}" not in replyTo list, skipping reply`)
+          }
+        } else {
+          console.log(`[Monitor] autoReply=false for "${source.name}", recording only`)
+        }
+
+        // ── Build and save record ───────────────────────────────────────
         const record = {
           id: uuidv4(),
-          sourceName: chat.name,
+          sourceName: source.name,
           sender: msg.sender,
           senderTime: msg.time || new Date().toISOString(),
-          senderContent: msg.content?.substring(0, 100),
+          senderContent: msg.content.substring(0, DEDUP_LEN),
           senderContentFull: msg.content,
+          dedupKey,
+          replyContent: aiResult.text?.substring(0, 100) || '',
+          replyContentFull: aiResult.text || '',
           replyTime: null,
-          replyContent: aiResult?.text?.substring(0, 100) || '',
-          replyContentFull: aiResult?.text || '',
-          category: category,
+          category: aiResult.todoSummary ? '待办事项' : '消息记录',
           hasTodo: false,
           processed: true,
           date: today
         }
 
-        // Step 5: Send reply if configured
-        if (aiResult && aiResult.text && source.skill?.autoReply) {
-          // Check replyTo filter
-          const replyTo = source.skill.replyTo
-          const shouldReply = !replyTo || replyTo.length === 0 ||
-            replyTo.includes(msg.sender) || replyTo.includes('*')
-
-          if (shouldReply) {
-            const sendResult = await browserService.sendMessage(chat.name, aiResult.text)
-            if (sendResult.success) {
-              record.replyTime = new Date().toISOString()
-            }
+        // ── Send reply ──────────────────────────────────────────────────
+        if (aiResult.text && source.skill?.autoReply) {
+          const sendResult = await browserService.sendMessage(source.name, aiResult.text)
+          if (sendResult.success) {
+            record.replyTime = new Date().toISOString()
+            console.log(`[Monitor] Reply sent to "${source.name}"`)
+          } else {
+            console.warn(`[Monitor] Send failed: ${sendResult.message}`)
           }
         }
 
-        // Step 6: Create todo if AI or strategy indicates it
-        const todoSummary = aiResult?.todoSummary
-        if (todoSummary) {
+        // ── Create todo if AI returned a summary ────────────────────────
+        if (aiResult.todoSummary) {
           record.hasTodo = true
+          const todoId = uuidv4()
           todosDB.insert({
-            id: uuidv4(),
-            sourceName: chat.name,
+            id: todoId,
+            sourceName: source.name,
             messageId: record.id,
-            content: todoSummary,
-            category: category,
+            content: aiResult.todoSummary,
+            category: '待办事项',
             completed: false,
             isHistorical: false,
             date: today,
             completedAt: null
           })
+          console.log(`[Monitor] Todo created: "${aiResult.todoSummary}"`)
+
+          // ── Call internal todo webhook (if configured) ──────────────
+          const webhookUrl = source.skill?.todoWebhook?.url
+          if (webhookUrl) {
+            this._callTodoWebhook(webhookUrl, source.skill.todoWebhook, {
+              todoId,
+              messageId: record.id,
+              sourceName: source.name,
+              sender: msg.sender,
+              senderTime: record.senderTime,
+              originalMessage: msg.content,
+              summary: aiResult.todoSummary,
+              reply: aiResult.text || '',
+              date: today,
+              timestamp: new Date().toISOString()
+            }).catch(err => console.error('[Webhook] Todo webhook failed:', err.message))
+          }
         }
 
         messagesDB.insert(record)
 
-        // Broadcast to frontend via WebSocket
+        // ── WebSocket broadcast ─────────────────────────────────────────
         this.broadcast('new_message', record)
         if (record.hasTodo) {
-          this.broadcast('new_todo', { sourceName: chat.name, content: todoSummary })
+          this.broadcast('new_todo', { sourceName: source.name, content: aiResult.todoSummary })
         }
       }
     } catch (err) {
-      console.error('[Monitor] Process error:', err)
+      console.error('[Monitor] _processNewMessages error:', err)
     }
   }
 
   /**
-   * Generate reply using 3-tier priority: AI → MCP → Template
+   * Call the configured internal todo webhook
+   * @param {string} url - target endpoint
+   * @param {Object} webhookConfig - { url, method, headers, bodyTemplate }
+   * @param {Object} payload - todo data to send
    */
-  async _generateReply(msg, source, category, recentMessages) {
-    const skill = source.skill
-    if (!skill || !skill.autoReply) {
-      return null
-    }
+  async _callTodoWebhook(url, webhookConfig, payload) {
+    const method = webhookConfig.method || 'POST'
 
-    let result = { text: '', todoSummary: null }
-
-    // Priority 1: AI model with category-specific strategy
-    try {
-      const aiResult = await aiService.generateReply({
-        message: msg.content,
-        sender: msg.sender,
-        sourceName: source.name,
-        category,
-        skill,
-        recentMessages
+    // Support custom body template (replace {{key}} placeholders)
+    let body
+    if (webhookConfig.bodyTemplate) {
+      let tpl = webhookConfig.bodyTemplate
+      Object.entries(payload).forEach(([k, v]) => {
+        tpl = tpl.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), String(v ?? ''))
       })
-      if (aiResult && aiResult.text) {
-        result = aiResult
-        console.log(`[Monitor] AI reply for ${source.name} [${category}]: ${result.text.substring(0, 60)}...`)
-      }
-    } catch (err) {
-      console.error('[Monitor] AI generation error:', err)
+      try { body = JSON.parse(tpl) } catch { body = tpl }
+    } else {
+      body = payload // default: send full payload
     }
 
-    // Priority 2: MCP external service
-    if (!result.text && skill.mcpService) {
-      try {
-        const mcpReply = await this._callMCPService(skill.mcpService, msg, category)
-        if (mcpReply) result.text = mcpReply
-      } catch (err) {
-        console.error('[Monitor] MCP call error:', err)
-      }
+    const headers = {
+      'Content-Type': 'application/json',
+      ...(webhookConfig.headers || {})
     }
 
-    // Priority 3: Template fallback
-    if (!result.text) {
-      const templates = skill.replyTemplates || {}
-      switch (category) {
-        case '业务咨询':
-          result.text = templates.business || '收到您的咨询，我会尽快处理并回复您。'
-          break
-        case '事项跟进':
-          result.text = templates.followup || '好的，我确认一下最新进度后回复您。'
-          result.todoSummary = result.todoSummary || `[${msg.sender}] ${msg.content.substring(0, 50)} - 跟进`
-          break
-        case '新事项登记':
-          result.text = templates.newItem || '已记录，我会尽快安排处理。'
-          result.todoSummary = result.todoSummary || `[${msg.sender}] ${msg.content.substring(0, 50)} - 新事项`
-          break
-        default:
-          result.text = templates.daily || '收到，谢谢！'
-          break
-      }
+    console.log(`[Webhook] POST ${url} — "${payload.summary}"`)
+    const res = await fetch(url, {
+      method,
+      headers,
+      body: typeof body === 'string' ? body : JSON.stringify(body)
+    })
+
+    if (!res.ok) {
+      const errText = await res.text()
+      throw new Error(`HTTP ${res.status}: ${errText.substring(0, 100)}`)
     }
 
-    // Apply terminology substitutions
-    if (skill.terminology && result.text) {
-      for (const [key, val] of Object.entries(skill.terminology)) {
-        result.text = result.text.replace(new RegExp(key, 'g'), val)
-      }
-    }
-
+    const result = await res.text()
+    console.log(`[Webhook] Response: ${result.substring(0, 80)}`)
     return result
-  }
-
-  async _callMCPService(mcpConfig, msg, category) {
-    try {
-      const url = mcpConfig.url
-      if (!url) return ''
-
-      const body = {
-        message: msg.content,
-        sender: msg.sender,
-        category: category,
-        ...(mcpConfig.extraParams || {})
-      }
-
-      const response = await fetch(url, {
-        method: mcpConfig.method || 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(mcpConfig.headers || {})
-        },
-        body: JSON.stringify(body)
-      })
-
-      if (response.ok) {
-        const data = await response.json()
-        return data.reply || data.text || data.message || ''
-      }
-    } catch (err) {
-      console.error('[MCP] Service call failed:', err)
-    }
-    return ''
   }
 }
 

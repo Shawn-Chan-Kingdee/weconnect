@@ -6,32 +6,25 @@ const API = '/api'
 const DEFAULT_SKILL = {
   autoReply: false,
   replyTo: ['*'],
-  tone: '专业友好',
-  attitude: '积极主动',
+  prompt: '',
   terminology: {},
-  replyTemplates: {
-    daily: '收到，谢谢！',
-    business: '收到您的咨询，我会尽快处理。',
-    followup: '好的，我确认进度后回复您。',
-    newItem: '已记录，我会尽快安排。'
-  },
-  classifyKeywords: {
-    business: ['报价', '合同', '方案', '需求'],
-    followup: ['进度', '跟进', '状态', '完成'],
-    newItem: ['新项目', '安排', '登记', '新需求']
-  },
-  mcpService: null
+  todoWebhook: null   // { url, method, headers, bodyTemplate }
 }
 
 export default function SettingsPage({ sources, setSources, onComplete, onBack }) {
-  const [activeTab, setActiveTab] = useState('sources') // 'sources' | 'models'
+  const [activeTab, setActiveTab] = useState('sources')
   const [newName, setNewName] = useState('')
   const [editingId, setEditingId] = useState(null)
   const [editSkill, setEditSkill] = useState(null)
   const [error, setError] = useState('')
-  const [mcpUrl, setMcpUrl] = useState('')
-  const [mcpMethod, setMcpMethod] = useState('POST')
   const [replyToStr, setReplyToStr] = useState('')
+  const [termStr, setTermStr] = useState('')
+  const [webhookUrl, setWebhookUrl] = useState('')
+  const [webhookMethod, setWebhookMethod] = useState('POST')
+  const [webhookHeaders, setWebhookHeaders] = useState('') // "Key: Value" per line
+  const [webhookBodyTpl, setWebhookBodyTpl] = useState('')
+  const [webhookTesting, setWebhookTesting] = useState(false)
+  const [webhookTestResult, setWebhookTestResult] = useState(null)
 
   useEffect(() => {
     fetch(`${API}/settings/sources`).then(r => r.json()).then(setSources).catch(() => {})
@@ -44,13 +37,15 @@ export default function SettingsPage({ sources, setSources, onComplete, onBack }
       const res = await fetch(`${API}/settings/sources`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newName.trim(), skill: DEFAULT_SKILL })
+        body: JSON.stringify({ name: newName.trim() })
       })
       const data = await res.json()
       if (data.error) { setError(data.error); return }
-      setSources(prev => [...prev, data])
+      const updated = [...sources, data]
+      setSources(updated)
       setNewName('')
       setError('')
+      startEdit(data)
     } catch (err) { setError(err.message) }
   }
 
@@ -61,19 +56,53 @@ export default function SettingsPage({ sources, setSources, onComplete, onBack }
   }
 
   const startEdit = (source) => {
+    const skill = { ...DEFAULT_SKILL, ...source.skill }
     setEditingId(source.id)
-    setEditSkill({ ...DEFAULT_SKILL, ...source.skill })
-    setReplyToStr((source.skill?.replyTo || ['*']).join(', '))
-    setMcpUrl(source.skill?.mcpService?.url || '')
-    setMcpMethod(source.skill?.mcpService?.method || 'POST')
+    setEditSkill(skill)
+    setReplyToStr((skill.replyTo || ['*']).join(', '))
+    const terms = skill.terminology || {}
+    setTermStr(Object.entries(terms).map(([k, v]) => `${k}=${v}`).join('\n'))
+    // Webhook
+    const wh = skill.todoWebhook || {}
+    setWebhookUrl(wh.url || '')
+    setWebhookMethod(wh.method || 'POST')
+    setWebhookHeaders(Object.entries(wh.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n'))
+    setWebhookBodyTpl(wh.bodyTemplate || '')
+    setWebhookTestResult(null)
   }
 
   const saveSkill = async () => {
     if (!editingId || !editSkill) return
+    const terminology = {}
+    termStr.split('\n').forEach(line => {
+      const idx = line.indexOf('=')
+      if (idx > 0) {
+        const k = line.substring(0, idx).trim()
+        const v = line.substring(idx + 1).trim()
+        if (k && v) terminology[k] = v
+      }
+    })
+    // Parse webhook headers: "Key: Value" per line
+    const parsedHeaders = {}
+    webhookHeaders.split('\n').forEach(line => {
+      const idx = line.indexOf(':')
+      if (idx > 0) {
+        parsedHeaders[line.substring(0, idx).trim()] = line.substring(idx + 1).trim()
+      }
+    })
+
+    const todoWebhook = webhookUrl.trim() ? {
+      url: webhookUrl.trim(),
+      method: webhookMethod,
+      headers: parsedHeaders,
+      bodyTemplate: webhookBodyTpl.trim() || null
+    } : null
+
     const skill = {
       ...editSkill,
       replyTo: replyToStr.split(',').map(s => s.trim()).filter(Boolean),
-      mcpService: mcpUrl ? { url: mcpUrl, method: mcpMethod, headers: {} } : null
+      terminology,
+      todoWebhook
     }
     await fetch(`${API}/settings/sources/${editingId}`, {
       method: 'PUT',
@@ -83,6 +112,52 @@ export default function SettingsPage({ sources, setSources, onComplete, onBack }
     setSources(prev => prev.map(s => s.id === editingId ? { ...s, skill } : s))
     setEditingId(null)
     setEditSkill(null)
+  }
+
+  const testWebhook = async () => {
+    if (!webhookUrl.trim()) return
+    setWebhookTesting(true)
+    setWebhookTestResult(null)
+    try {
+      const parsedHeaders = {}
+      webhookHeaders.split('\n').forEach(line => {
+        const idx = line.indexOf(':')
+        if (idx > 0) parsedHeaders[line.substring(0, idx).trim()] = line.substring(idx + 1).trim()
+      })
+
+      const testPayload = {
+        todoId: 'test-' + Date.now(),
+        messageId: 'test-msg',
+        sourceName: sources.find(s => s.id === editingId)?.name || 'test',
+        sender: '测试用户',
+        senderTime: new Date().toISOString(),
+        originalMessage: '这是一条测试消息',
+        summary: '【测试】Webhook 连通性验证',
+        reply: '收到，已处理',
+        date: new Date().toISOString().split('T')[0],
+        timestamp: new Date().toISOString()
+      }
+
+      let body = testPayload
+      if (webhookBodyTpl.trim()) {
+        let tpl = webhookBodyTpl
+        Object.entries(testPayload).forEach(([k, v]) => {
+          tpl = tpl.replace(new RegExp(`\\{\\{${k}\\}\\}`, 'g'), String(v))
+        })
+        try { body = JSON.parse(tpl) } catch { body = tpl }
+      }
+
+      const res = await fetch(webhookUrl.trim(), {
+        method: webhookMethod,
+        headers: { 'Content-Type': 'application/json', ...parsedHeaders },
+        body: typeof body === 'string' ? body : JSON.stringify(body)
+      })
+      const text = await res.text()
+      setWebhookTestResult({ ok: res.ok, status: res.status, body: text.substring(0, 200) })
+    } catch (err) {
+      setWebhookTestResult({ ok: false, status: 0, body: err.message })
+    }
+    setWebhookTesting(false)
   }
 
   const handleComplete = () => {
@@ -99,22 +174,17 @@ export default function SettingsPage({ sources, setSources, onComplete, onBack }
           <button
             className={`settings-tab ${activeTab === 'sources' ? 'active' : ''}`}
             onClick={() => setActiveTab('sources')}
-          >
-            📋 消息来源 & Skill
-          </button>
+          >📋 消息来源 & Prompt</button>
           <button
             className={`settings-tab ${activeTab === 'models' ? 'active' : ''}`}
             onClick={() => setActiveTab('models')}
-          >
-            🤖 AI 模型配置
-          </button>
+          >🤖 AI 模型配置</button>
         </div>
         <button className="btn-primary" onClick={handleComplete} disabled={sources.length === 0}>
           完成设置 →
         </button>
       </div>
 
-      {/* Tab: Sources & Skills */}
       {activeTab === 'sources' && (
         <div className="settings-body">
           {/* Left: Source List */}
@@ -126,7 +196,7 @@ export default function SettingsPage({ sources, setSources, onComplete, onBack }
                 value={newName}
                 onChange={e => setNewName(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && addSource()}
-                placeholder="输入群名或联系人名称..."
+                placeholder="输入群名或联系人（需与微信显示完全一致）"
                 maxLength={50}
               />
               <button className="btn-add" onClick={addSource} disabled={sources.length >= 5}>
@@ -151,9 +221,10 @@ export default function SettingsPage({ sources, setSources, onComplete, onBack }
                     <button className="btn-remove" onClick={e => { e.stopPropagation(); removeSource(source.id) }}>×</button>
                   </div>
                   <div className="source-card-meta">
-                    <span>语气: {source.skill?.tone || '默认'}</span>
-                    <span>态度: {source.skill?.attitude || '默认'}</span>
-                    {source.skill?.mcpService?.url && <span className="mcp-badge">MCP</span>}
+                    {source.skill?.prompt
+                      ? <span className="prompt-preview">Prompt: {source.skill.prompt.substring(0, 45)}…</span>
+                      : <span className="prompt-empty">⚠ 未配置 Prompt，点击配置</span>
+                    }
                   </div>
                 </div>
               ))}
@@ -163,14 +234,18 @@ export default function SettingsPage({ sources, setSources, onComplete, onBack }
             </div>
           </div>
 
-          {/* Right: Skill Editor */}
+          {/* Right: Prompt Editor */}
           <div className="settings-skill">
             {editSkill ? (
               <>
-                <h2>Skill 配置 — {sources.find(s => s.id === editingId)?.name}</h2>
+                <h2>
+                  Prompt 配置
+                  <span className="source-name-title"> — {sources.find(s => s.id === editingId)?.name}</span>
+                </h2>
 
+                {/* Auto reply toggle */}
                 <div className="skill-section">
-                  <h3>基本设置</h3>
+                  <h3>回复设置</h3>
                   <label className="skill-toggle">
                     <input
                       type="checkbox"
@@ -178,126 +253,161 @@ export default function SettingsPage({ sources, setSources, onComplete, onBack }
                       onChange={e => setEditSkill(p => ({ ...p, autoReply: e.target.checked }))}
                     />
                     <span>启用自动回复</span>
+                    <span className="toggle-hint">（关闭则仅监控记录，不发送回复）</span>
                   </label>
-                  <label className="skill-label">
-                    回复对象（<code>*</code> 表示所有人，多个用逗号分隔）
+                  <label className="skill-label" style={{ marginTop: 12 }}>
+                    回复对象
+                    <span className="skill-hint-inline"> — * 表示所有人，多个用英文逗号分隔</span>
                     <input
                       type="text"
                       value={replyToStr}
                       onChange={e => setReplyToStr(e.target.value)}
-                      placeholder="*, 张三, 李四"
+                      placeholder="* 或 张三, 李四"
                     />
                   </label>
-                  <div className="skill-row">
-                    <label className="skill-label">
-                      回复语气
-                      <select value={editSkill.tone} onChange={e => setEditSkill(p => ({ ...p, tone: e.target.value }))}>
-                        <option>专业友好</option>
-                        <option>正式严谨</option>
-                        <option>轻松活泼</option>
-                        <option>简洁高效</option>
+                </div>
+
+                {/* Prompt Whiteboard — core feature */}
+                <div className="skill-section prompt-section">
+                  <h3>AI 回复 Prompt
+                    <span className="skill-hint-inline"> — 直接写给大模型的指令</span>
+                  </h3>
+                  <p className="prompt-tip">
+                    💡 用自然语言写清楚 AI 的角色、回复风格和注意事项即可。<br />
+                    如需自动创建待办，可在 Prompt 中说明，AI 会返回 JSON：
+                    <code> {`{"reply":"...","todoSummary":"..."}`}</code>
+                  </p>
+                  <textarea
+                    className="prompt-textarea"
+                    rows={14}
+                    value={editSkill.prompt}
+                    onChange={e => setEditSkill(p => ({ ...p, prompt: e.target.value }))}
+                    placeholder={`示例 Prompt：
+
+你是一个专业的商务助理，负责处理来自"超票新动能"群的消息。
+
+【角色】代替创始人回复群内消息，态度积极、简洁专业。
+
+【回复规则】
+- 对于咨询/问题：给出明确答复或告知跟进时间
+- 对于任务安排：确认收到，并给出初步时间预期
+- 控制在 80 字以内
+- 口语化，不要太正式
+
+【需要待办时】返回 JSON 格式：
+{"reply": "回复内容", "todoSummary": "需要处理的事项摘要"}`}
+                  />
+                  <div className="prompt-char-count">{editSkill.prompt?.length || 0} 字</div>
+                </div>
+
+                {/* Terminology — optional */}
+                <div className="skill-section">
+                  <h3>术语替换 <span className="skill-hint-inline">（可选，每行一条，格式：原词=替换词）</span></h3>
+                  <textarea
+                    className="term-textarea"
+                    rows={3}
+                    value={termStr}
+                    onChange={e => setTermStr(e.target.value)}
+                    placeholder={'客户=甲方\nBug=问题'}
+                  />
+                </div>
+
+                {/* Todo Webhook */}
+                <div className="skill-section webhook-section">
+                  <h3>📡 待办事项 Webhook
+                    <span className="skill-hint-inline"> — AI 生成待办时自动推送到内部系统</span>
+                  </h3>
+                  <p className="webhook-tip">
+                    配置后，每次 AI 返回 todoSummary 时，WeConnect 会立即 POST 到此地址。<br />
+                    默认发送完整的待办数据，也可自定义请求体模板。
+                  </p>
+
+                  <div className="webhook-row">
+                    <label className="skill-label webhook-method-label">
+                      方法
+                      <select value={webhookMethod} onChange={e => setWebhookMethod(e.target.value)}>
+                        <option>POST</option>
+                        <option>PUT</option>
+                        <option>PATCH</option>
                       </select>
                     </label>
-                    <label className="skill-label">
-                      回复态度
-                      <select value={editSkill.attitude} onChange={e => setEditSkill(p => ({ ...p, attitude: e.target.value }))}>
-                        <option>积极主动</option>
-                        <option>稳健审慎</option>
-                        <option>热情服务</option>
-                        <option>中立客观</option>
-                      </select>
+                    <label className="skill-label webhook-url-label">
+                      接口地址
+                      <input
+                        type="text"
+                        value={webhookUrl}
+                        onChange={e => { setWebhookUrl(e.target.value); setWebhookTestResult(null) }}
+                        placeholder="https://your-api.com/api/todos/create"
+                      />
                     </label>
+                  </div>
+
+                  <label className="skill-label">
+                    请求头 <span className="skill-hint-inline">（每行一条，格式：Header-Name: value）</span>
+                    <textarea
+                      className="term-textarea"
+                      rows={3}
+                      value={webhookHeaders}
+                      onChange={e => setWebhookHeaders(e.target.value)}
+                      placeholder={'Authorization: Bearer your-token\nX-Source: weconnect'}
+                    />
+                  </label>
+
+                  <label className="skill-label">
+                    自定义请求体 <span className="skill-hint-inline">（可选，留空则发送完整数据，支持 {`{{占位符}}`}）</span>
+                    <textarea
+                      className="term-textarea"
+                      rows={5}
+                      value={webhookBodyTpl}
+                      onChange={e => setWebhookBodyTpl(e.target.value)}
+                      placeholder={`留空则发送完整 JSON，或自定义格式，例如：\n{\n  "title": "{{summary}}",\n  "from": "{{sender}}",\n  "group": "{{sourceName}}",\n  "msg": "{{originalMessage}}"\n}`}
+                    />
+                  </label>
+
+                  <div className="webhook-actions">
+                    <button
+                      className="btn-test-webhook"
+                      onClick={testWebhook}
+                      disabled={!webhookUrl.trim() || webhookTesting}
+                    >
+                      {webhookTesting ? '测试中…' : '🔗 测试连通性'}
+                    </button>
+                    {webhookTestResult && (
+                      <span className={`webhook-test-result ${webhookTestResult.ok ? 'ok' : 'fail'}`}>
+                        {webhookTestResult.ok
+                          ? `✅ ${webhookTestResult.status} 成功 — ${webhookTestResult.body}`
+                          : `❌ ${webhookTestResult.status || '错误'} — ${webhookTestResult.body}`
+                        }
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="webhook-payload-hint">
+                    <strong>默认发送的字段：</strong>
+                    <code>todoId · messageId · sourceName · sender · senderTime · originalMessage · summary · reply · date · timestamp</code>
                   </div>
                 </div>
 
-                <div className="skill-section">
-                  <h3>回复模板 <span className="skill-hint-inline">（AI 模型已激活时作为参考；未激活时直接使用）</span></h3>
-                  {[
-                    ['daily', '日常沟通'],
-                    ['business', '业务咨询'],
-                    ['followup', '事项跟进'],
-                    ['newItem', '新事项登记']
-                  ].map(([key, label]) => (
-                    <label className="skill-label" key={key}>
-                      {label}
-                      <textarea
-                        rows={2}
-                        value={editSkill.replyTemplates?.[key] || ''}
-                        onChange={e => setEditSkill(p => ({
-                          ...p,
-                          replyTemplates: { ...p.replyTemplates, [key]: e.target.value }
-                        }))}
-                      />
-                    </label>
-                  ))}
-                </div>
-
-                <div className="skill-section">
-                  <h3>分类关键词</h3>
-                  {[
-                    ['business', '业务咨询'],
-                    ['followup', '事项跟进'],
-                    ['newItem', '新事项登记']
-                  ].map(([key, label]) => (
-                    <label className="skill-label" key={key}>
-                      {label}
-                      <input
-                        type="text"
-                        value={(editSkill.classifyKeywords?.[key] || []).join(', ')}
-                        onChange={e => setEditSkill(p => ({
-                          ...p,
-                          classifyKeywords: {
-                            ...p.classifyKeywords,
-                            [key]: e.target.value.split(',').map(s => s.trim()).filter(Boolean)
-                          }
-                        }))}
-                        placeholder="关键词1, 关键词2, ..."
-                      />
-                    </label>
-                  ))}
-                </div>
-
-                <div className="skill-section">
-                  <h3>MCP 外部服务（可选）</h3>
-                  <label className="skill-label">
-                    服务 URL
-                    <input
-                      type="text"
-                      value={mcpUrl}
-                      onChange={e => setMcpUrl(e.target.value)}
-                      placeholder="https://api.example.com/reply"
-                    />
-                  </label>
-                  <label className="skill-label">
-                    请求方法
-                    <select value={mcpMethod} onChange={e => setMcpMethod(e.target.value)}>
-                      <option>POST</option>
-                      <option>GET</option>
-                    </select>
-                  </label>
-                  <p className="skill-hint">接收 <code>{`{ message, sender, category }`}</code>，返回 <code>{`{ reply }`}</code></p>
-                </div>
-
                 <div className="skill-actions">
-                  <button className="btn-primary" onClick={saveSkill}>保存 Skill</button>
+                  <button className="btn-primary" onClick={saveSkill}>💾 保存配置</button>
                   <button className="btn-secondary" onClick={() => { setEditingId(null); setEditSkill(null) }}>取消</button>
                 </div>
               </>
             ) : (
               <div className="skill-placeholder">
-                <div className="skill-placeholder-icon">⚙️</div>
-                <p>选择左侧消息来源以配置 Skill</p>
-                <p className="skill-placeholder-desc">Skill 定义如何自动处理每个对话，包括回复语气、分类规则和模板</p>
+                <div className="skill-placeholder-icon">✏️</div>
+                <p>点击左侧消息来源开始配置 Prompt</p>
+                <p className="skill-placeholder-desc">
+                  直接用自然语言写 Prompt，AI 将按照你的要求处理消息。<br />
+                  无需分类规则和回复模板。
+                </p>
               </div>
             )}
           </div>
         </div>
       )}
 
-      {/* Tab: AI Model Config */}
-      {activeTab === 'models' && (
-        <ModelSettings />
-      )}
+      {activeTab === 'models' && <ModelSettings />}
     </div>
   )
 }
