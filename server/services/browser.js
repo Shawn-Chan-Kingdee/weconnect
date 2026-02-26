@@ -1,6 +1,12 @@
 /**
  * Playwright Browser Service
  * Manages the WeChat Web browser instance and page interactions
+ *
+ * Bug fixes:
+ * - getChatList: use multiple selector fallbacks for chat name (h3 is wrong on wx.qq.com)
+ * - getMessages: more robust content extraction and type detection
+ * - checkLoginStatus: more robust check
+ * - Added detailed [Browser] debug logging
  */
 import { chromium } from 'playwright'
 import path from 'path'
@@ -24,7 +30,6 @@ class BrowserService {
     }
 
     try {
-      // Use persistent context to preserve login session
       this.context = await chromium.launchPersistentContext(this.userDataDir, {
         headless: false,
         viewport: { width: 1280, height: 800 },
@@ -39,11 +44,11 @@ class BrowserService {
       await this.page.goto('https://wx.qq.com', { waitUntil: 'domcontentloaded', timeout: 30000 })
 
       this.isConnected = true
-      this.browser = true // marker
+      this.browser = true
 
       return { success: true, message: '微信网页版已启动，请扫码登录' }
     } catch (err) {
-      console.error('Browser launch error:', err)
+      console.error('[Browser] Launch error:', err)
       return { success: false, message: `启动失败: ${err.message}` }
     }
   }
@@ -51,11 +56,19 @@ class BrowserService {
   async checkLoginStatus() {
     if (!this.page) return { loggedIn: false }
     try {
-      // Check if chat list is visible (indicates logged in)
-      const chatList = await this.page.$('.chat_item')
-      const loginQR = await this.page.$('.qrcode')
-      this.isLoggedIn = !!chatList && !loginQR
-      return { loggedIn: this.isLoggedIn }
+      const result = await this.page.evaluate(() => {
+        // Check for QR code (not logged in)
+        const qr = document.querySelector('.qrcode') || document.querySelector('#qrcode')
+        if (qr && qr.offsetParent !== null) return { loggedIn: false }
+
+        // Check for chat list (logged in)
+        const chatList = document.querySelector('.chat_item') ||
+                         document.querySelector('#chatArea') ||
+                         document.querySelector('.conversations')
+        return { loggedIn: !!chatList }
+      })
+      this.isLoggedIn = result.loggedIn
+      return result
     } catch {
       return { loggedIn: false }
     }
@@ -64,23 +77,43 @@ class BrowserService {
   async getChatList() {
     if (!this.page || !this.isLoggedIn) return []
     try {
-      return await this.page.evaluate(() => {
+      const list = await this.page.evaluate(() => {
         const items = document.querySelectorAll('.chat_item')
-        return Array.from(items).map(item => {
-          const nameEl = item.querySelector('h3')
-          const timeEl = item.querySelector('.attr')
-          const previewEl = item.querySelector('.msg_content') || item.querySelector('p:last-child')
-          const unreadEl = item.querySelector('.web_wechat_reddot_middle')
-          return {
-            name: nameEl?.textContent?.trim() || '',
-            time: timeEl?.textContent?.trim() || '',
-            preview: previewEl?.textContent?.trim() || '',
-            unread: unreadEl ? parseInt(unreadEl.textContent) || 0 : 0
-          }
+        const results = []
+        items.forEach(item => {
+          // ── Try multiple selectors for the chat name ──────────────────
+          // WeChat Web uses different class names across versions
+          const nameEl =
+            item.querySelector('.nickname_text') ||   // most common
+            item.querySelector('.nickname') ||
+            item.querySelector('h3') ||
+            item.querySelector('.contact_name') ||
+            item.querySelector('.nick_name') ||
+            item.querySelector('[title]')             // some elements carry title attr
+
+          let name = nameEl?.textContent?.trim() || nameEl?.getAttribute('title')?.trim() || ''
+
+          // ── Unread count ─────────────────────────────────────────────
+          const unreadEl =
+            item.querySelector('.web_wechat_reddot_middle') ||
+            item.querySelector('.unread-count') ||
+            item.querySelector('.badge')
+
+          const unreadRaw = unreadEl?.textContent?.trim() || '0'
+          const unread = parseInt(unreadRaw) || (unreadEl ? 1 : 0) // if badge exists but no number, assume 1
+
+          if (name) results.push({ name, unread })
         })
+        return results
       })
+
+      console.log(`[Browser] getChatList: found ${list.length} chats, ${list.filter(c => c.unread > 0).length} with unread`)
+      if (list.length > 0) {
+        console.log(`[Browser] Chat names: ${list.slice(0, 5).map(c => c.name).join(', ')}`)
+      }
+      return list
     } catch (err) {
-      console.error('getChatList error:', err)
+      console.error('[Browser] getChatList error:', err)
       return []
     }
   }
@@ -88,30 +121,39 @@ class BrowserService {
   async openChat(chatName) {
     if (!this.page) return false
     try {
-      // Click on chat item by name
-      const chatItem = await this.page.locator('.chat_item').filter({ hasText: chatName }).first()
+      // Try exact match first
+      let chatItem = this.page.locator('.chat_item').filter({ hasText: chatName }).first()
       if (await chatItem.count() > 0) {
         await chatItem.click()
-        await this.page.waitForTimeout(500)
+        await this.page.waitForTimeout(600)
+        console.log(`[Browser] Opened chat (exact): ${chatName}`)
         return true
       }
 
-      // If not in visible list, search for it
-      const searchBox = await this.page.$('input[placeholder="搜索"]')
-      if (searchBox) {
+      // Try search box fallback
+      const searchBox = this.page.locator('input[placeholder="搜索"]').first()
+      if (await searchBox.count() > 0) {
         await searchBox.click()
         await searchBox.fill(chatName)
-        await this.page.waitForTimeout(1000)
-        const result = await this.page.locator('.search_list .contact_item').filter({ hasText: chatName }).first()
+        await this.page.waitForTimeout(1200)
+
+        const result = this.page.locator('.search_list .contact_item, .search-list .chat_item').filter({ hasText: chatName }).first()
         if (await result.count() > 0) {
           await result.click()
-          await this.page.waitForTimeout(500)
+          await this.page.waitForTimeout(600)
+          console.log(`[Browser] Opened chat (search): ${chatName}`)
           return true
         }
+
+        // Clear search
+        await searchBox.fill('')
+        await this.page.keyboard.press('Escape')
       }
+
+      console.warn(`[Browser] Chat not found: "${chatName}"`)
       return false
     } catch (err) {
-      console.error('openChat error:', err)
+      console.error('[Browser] openChat error:', err)
       return false
     }
   }
@@ -122,27 +164,75 @@ class BrowserService {
       const opened = await this.openChat(chatName)
       if (!opened) return []
 
-      return await this.page.evaluate(() => {
-        const msgs = document.querySelectorAll('.message')
-        return Array.from(msgs).map(msg => {
+      // Wait a moment for messages to load
+      await this.page.waitForTimeout(500)
+
+      const msgs = await this.page.evaluate(() => {
+        const items = document.querySelectorAll('.message')
+        return Array.from(items).map(msg => {
           const isMe = msg.classList.contains('me')
-          const isSystem = msg.classList.contains('message_system')
-          const nickEl = msg.querySelector('.nickname')
-          const contentEl = msg.querySelector('.plain') || msg.querySelector('.bubble')
-          const timeEl = msg.querySelector('.message_system .content')
-          const imgEl = msg.querySelector('.msg_img') || msg.querySelector('.bubble img')
+          const isSystem = msg.classList.contains('message_system') || msg.classList.contains('system')
+
+          // ── Sender name ───────────────────────────────────────────────
+          const nickEl = msg.querySelector('.nickname') || msg.querySelector('.alias')
+          const sender = isMe ? '我' : (nickEl?.textContent?.trim() || '')
+
+          // ── Determine message type by outer class first ───────────────
+          // WeChat marks message type on the outer .message element itself:
+          //   .message_img → image, .message_voice → audio, .message_video → video
+          //   .message_app → shared link/file,  plain text has no such class
+          const isImgMsg   = msg.classList.contains('message_img')
+          const isVoiceMsg = msg.classList.contains('message_voice')
+          const isVideoMsg = msg.classList.contains('message_video')
+          const isAppMsg   = msg.classList.contains('message_app')
+
+          // ── Content extraction ────────────────────────────────────────
+          let content = ''
+          let hasImage = false
+
+          if (isImgMsg) {
+            // Real image message — do NOT use .bubble img (would also match emoji)
+            content = '[图片]'
+            hasImage = true
+          } else if (isVoiceMsg) {
+            content = '[语音]'
+          } else if (isVideoMsg) {
+            content = '[视频]'
+          } else if (isAppMsg) {
+            // Shared link / mini-program / file
+            const titleEl = msg.querySelector('.title') || msg.querySelector('.appmsg_title')
+            const descEl  = msg.querySelector('.desc')  || msg.querySelector('.appmsg_desc')
+            content = titleEl?.innerText?.trim()
+              ? `[链接] ${titleEl.innerText.trim()}${descEl ? ': ' + descEl.innerText.trim() : ''}`
+              : '[链接/文件]'
+          } else {
+            // Text message — .plain holds the text; emoji inside it are <img> tags
+            // innerText will correctly skip <img> nodes (they have no alt text in WeChat)
+            const plainEl = msg.querySelector('.plain')
+            if (plainEl) {
+              content = plainEl.innerText?.trim() || plainEl.textContent?.trim() || ''
+            } else {
+              // Fallback for other bubble layouts
+              const bubbleEl =
+                msg.querySelector('.bubble .content') ||
+                msg.querySelector('.bubble')
+              content = bubbleEl?.innerText?.trim() || ''
+            }
+          }
 
           return {
             type: isSystem ? 'system' : (isMe ? 'me' : 'other'),
-            sender: isMe ? '我' : (nickEl?.textContent?.trim() || ''),
-            content: contentEl?.textContent?.trim() || (imgEl ? '[图片]' : ''),
-            time: timeEl?.textContent?.trim() || '',
-            hasImage: !!imgEl
+            sender,
+            content,
+            hasImage
           }
-        })
+        }).filter(m => m.type !== 'system' && m.content) // skip system msgs and empty
       })
+
+      console.log(`[Browser] getMessages for "${chatName}": ${msgs.length} messages, ${msgs.filter(m => m.type === 'other').length} from others`)
+      return msgs
     } catch (err) {
-      console.error('getMessages error:', err)
+      console.error('[Browser] getMessages error:', err)
       return []
     }
   }
@@ -153,25 +243,23 @@ class BrowserService {
       const opened = await this.openChat(chatName)
       if (!opened) return { success: false, message: `未找到聊天: ${chatName}` }
 
-      // Focus edit area and type message
       const editArea = await this.page.$('#editArea')
       if (!editArea) return { success: false, message: '未找到输入框' }
 
       await editArea.click()
       await this.page.waitForTimeout(200)
 
-      // Clear existing content and type new message
-      await this.page.keyboard.press('Meta+a')
+      // Clear and type
+      await this.page.keyboard.press('ControlOrMeta+a')
       await this.page.keyboard.press('Backspace')
       await editArea.evaluate((el, msg) => {
         el.textContent = msg
-        // Trigger input event for Angular
         el.dispatchEvent(new Event('input', { bubbles: true }))
+        el.dispatchEvent(new Event('change', { bubbles: true }))
       }, text)
 
-      await this.page.waitForTimeout(200)
+      await this.page.waitForTimeout(300)
 
-      // Click send button
       const sendBtn = await this.page.$('.btn_send')
       if (sendBtn) {
         await sendBtn.click()
@@ -180,9 +268,10 @@ class BrowserService {
       }
 
       await this.page.waitForTimeout(500)
+      console.log(`[Browser] Message sent to "${chatName}": ${text.substring(0, 40)}...`)
       return { success: true, message: '消息已发送' }
     } catch (err) {
-      console.error('sendMessage error:', err)
+      console.error('[Browser] sendMessage error:', err)
       return { success: false, message: `发送失败: ${err.message}` }
     }
   }
@@ -191,9 +280,17 @@ class BrowserService {
     if (!this.page || !this.isLoggedIn) return []
     try {
       const chatList = await this.getChatList()
-      return chatList.filter(chat =>
-        sourceNames.includes(chat.name) && chat.unread > 0
+      const withUnread = chatList.filter(chat =>
+        sourceNames.some(name =>
+          chat.name === name ||
+          chat.name.includes(name) ||
+          name.includes(chat.name)
+        ) && chat.unread > 0
       )
+      if (withUnread.length > 0) {
+        console.log(`[Browser] New messages in: ${withUnread.map(c => `${c.name}(${c.unread})`).join(', ')}`)
+      }
+      return withUnread
     } catch {
       return []
     }
@@ -201,9 +298,7 @@ class BrowserService {
 
   async close() {
     try {
-      if (this.context) {
-        await this.context.close()
-      }
+      if (this.context) await this.context.close()
     } catch { /* ignore */ }
     this.browser = null
     this.context = null
@@ -213,6 +308,5 @@ class BrowserService {
   }
 }
 
-// Singleton
 const browserService = new BrowserService()
 export default browserService
