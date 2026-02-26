@@ -119,6 +119,7 @@ function App() {
           status={wechatStatus}
           wsMessages={wsMessages}
           onGoToSettings={handleGoToSettings}
+          onLaunch={handleLaunch}
         />
       )}
     </div>

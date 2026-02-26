@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import MessageLog from '../components/MessageLog.jsx'
 import TodoPanel from '../components/TodoPanel.jsx'
 
@@ -22,13 +22,61 @@ function formatDateLabel(dateStr) {
   return dateStr.slice(5) // MM-DD
 }
 
-export default function DashboardPage({ sources, status, wsMessages, onGoToSettings }) {
+export default function DashboardPage({ sources, status, wsMessages, onGoToSettings, onLaunch }) {
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0])
   const [activeTab, setActiveTab] = useState(0)
   const [messages, setMessages] = useState([])
   const [todos, setTodos] = useState({ todayNew: [], historicalPending: [] })
   const [detailMsg, setDetailMsg] = useState(null)
   const dateRange = getDateRange()
+
+  // Launch state
+  const [launching, setLaunching] = useState(false)
+  const [launchMsg, setLaunchMsg] = useState('')
+  const pollRef = useRef(null)
+
+  const handleLaunchClick = async () => {
+    if (launching) return
+    setLaunching(true)
+    setLaunchMsg('正在启动浏览器...')
+    try {
+      const result = await onLaunch()
+      if (result.success) {
+        setLaunchMsg('请用手机微信扫码登录...')
+        // Poll for login, stop when logged in
+        pollRef.current = setInterval(async () => {
+          try {
+            const res = await fetch(`${API}/wechat/status`)
+            const s = await res.json()
+            if (s.loggedIn) {
+              clearInterval(pollRef.current)
+              setLaunchMsg('已登录，正在启动监控...')
+              await fetch(`${API}/wechat/monitor/start`, { method: 'POST' })
+              setLaunching(false)
+              setLaunchMsg('')
+            }
+          } catch {}
+        }, 2000)
+        // Timeout 3 minutes
+        setTimeout(() => {
+          if (pollRef.current) {
+            clearInterval(pollRef.current)
+            setLaunching(false)
+            setLaunchMsg('')
+          }
+        }, 180000)
+      } else {
+        setLaunchMsg(result.message || '启动失败')
+        setTimeout(() => { setLaunching(false); setLaunchMsg('') }, 3000)
+      }
+    } catch (err) {
+      setLaunchMsg(err.message)
+      setTimeout(() => { setLaunching(false); setLaunchMsg('') }, 3000)
+    }
+  }
+
+  // Cleanup poll on unmount
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
 
   const fetchMessages = useCallback(async () => {
     if (sources.length === 0) return
@@ -94,6 +142,27 @@ export default function DashboardPage({ sources, status, wsMessages, onGoToSetti
             </svg>
           </div>
           <span className="topbar-title">WeConnect</span>
+
+          {/* Launch / Relaunch Button */}
+          <div className="topbar-launch">
+            {!launching ? (
+              <button
+                className={`btn-topbar-launch ${status.loggedIn ? 'relaunching' : 'offline'}`}
+                onClick={handleLaunchClick}
+                title={status.loggedIn ? '重新启动微信网页' : '启动微信网页版'}
+              >
+                <span className="btn-launch-icon">
+                  {status.loggedIn ? '↻' : '▶'}
+                </span>
+                {status.loggedIn ? '重启网页' : '启动网页'}
+              </button>
+            ) : (
+              <div className="topbar-launching">
+                <span className="topbar-spinner"></span>
+                <span className="topbar-launch-msg">{launchMsg}</span>
+              </div>
+            )}
+          </div>
         </div>
         <div className="topbar-right">
           <span className={`status-dot ${status.loggedIn ? 'online' : 'offline'}`}></span>

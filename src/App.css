@@ -1386,3 +1386,85 @@ code {
   color: var(--text-secondary);
   font-weight: 500;
 }
+
+/* ── Topbar Launch Button ─────────────────────────────────────────── */
+.topbar-launch {
+  display: flex;
+  align-items: center;
+  margin-left: 4px;
+}
+
+.btn-topbar-launch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: 1px solid transparent;
+}
+
+/* offline state: green — 提示用户需要启动 */
+.btn-topbar-launch.offline {
+  background: #07C160;
+  color: #fff;
+  border-color: #07C160;
+}
+.btn-topbar-launch.offline:hover {
+  background: #06ad55;
+}
+
+/* relaunching state: subtle gray — 已在线时重启 */
+.btn-topbar-launch.relaunching {
+  background: var(--bg);
+  color: var(--text-secondary);
+  border-color: var(--border);
+}
+.btn-topbar-launch.relaunching:hover {
+  background: #fef9c3;
+  color: #a16207;
+  border-color: #fde68a;
+}
+
+.btn-launch-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+/* Inline launching state */
+.topbar-launching {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #16a34a;
+  max-width: 220px;
+}
+
+.topbar-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid #bbf7d0;
+  border-top-color: #16a34a;
+  border-radius: 50%;
+  flex-shrink: 0;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.topbar-launch-msg {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
