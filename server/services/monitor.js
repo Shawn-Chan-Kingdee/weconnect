@@ -215,7 +215,7 @@ class MonitorService {
 
         // ── Collect sender context (36h history + current todos) ────────
         const senderHistory = this._getSenderHistory(source.name, msg.sender)
-        const senderTodos   = this._getSenderTodos(source.name, msg.sender)
+        const senderTodos   = this._getSenderTodos(source.id, msg.sender)  // isolated by groupId
         if (senderHistory.length > 0) {
           console.log(`[Monitor] Sender history: ${senderHistory.length} msg(s) from "${msg.sender}" in 36h`)
         }
@@ -285,6 +285,7 @@ class MonitorService {
           record.hasTodo = true
           this._mergeSenderTodos({
             source,
+            groupId: source.id,
             sender: msg.sender,
             senderHistory,
             aiReply: aiResult.text,
@@ -335,11 +336,12 @@ class MonitorService {
   }
 
   /**
-   * Get today's todos + all unfinished historical todos for a sender in a source.
+   * Get today's todos + all unfinished historical todos for a sender in a specific group.
+   * Uses groupId (source UUID) to isolate across different group chats.
    */
-  _getSenderTodos(sourceName, sender) {
+  _getSenderTodos(groupId, sender) {
     const today = new Date().toISOString().split('T')[0]
-    return todosDB.findAll({ sourceName, sender })
+    return todosDB.findAll({ groupId, sender })
       .filter(t => t.date === today || !t.completed)
   }
 
@@ -348,9 +350,10 @@ class MonitorService {
    * then upsert (update existing or create new) the sender's todo entry.
    * Also fires the webhook if configured.
    */
-  async _mergeSenderTodos({ source, sender, senderHistory, aiReply, senderTodos, newTodoSummary, triggerMessageId, today }) {
+  async _mergeSenderTodos({ source, groupId, sender, senderHistory, aiReply, senderTodos, newTodoSummary, triggerMessageId, today }) {
     const mergedContent = await aiService.mergeTodos({
       sender,
+      groupId,
       sourceName: source.name,
       senderHistory,
       aiReply,
@@ -360,8 +363,9 @@ class MonitorService {
 
     if (!mergedContent) return
 
-    // Upsert: one active (not completed) todo per sender per source
-    const existing = todosDB.findAll({ sourceName: source.name, sender })
+    // Upsert: one active (not completed) todo per sender per GROUP (groupId)
+    // groupId ensures the same sender in different group chats is isolated
+    const existing = todosDB.findAll({ groupId, sender })
       .find(t => !t.completed)
 
     let todoId
@@ -373,11 +377,12 @@ class MonitorService {
         messageId: triggerMessageId,
         isHistorical: false
       })
-      console.log(`[Monitor] Todo merged for "${sender}": "${mergedContent.substring(0, 60)}"`)
+      console.log(`[Monitor] Todo merged for "${sender}" in group "${source.name}": "${mergedContent.substring(0, 60)}"`)
     } else {
       todoId = uuidv4()
       todosDB.insert({
         id: todoId,
+        groupId,              // group isolation key (source UUID)
         sourceName: source.name,
         sender,
         messageId: triggerMessageId,
@@ -388,17 +393,18 @@ class MonitorService {
         date: today,
         completedAt: null
       })
-      console.log(`[Monitor] Todo created for "${sender}": "${mergedContent.substring(0, 60)}"`)
+      console.log(`[Monitor] Todo created for "${sender}" in group "${source.name}": "${mergedContent.substring(0, 60)}"`)
     }
 
     // Broadcast to frontend
-    this.broadcast('new_todo', { sourceName: source.name, sender, content: mergedContent })
+    this.broadcast('new_todo', { groupId, sourceName: source.name, sender, content: mergedContent })
 
     // ── Fire webhook if configured ──────────────────────────────────
     const webhookUrl = source.skill?.todoWebhook?.url
     if (webhookUrl) {
       this._callTodoWebhook(webhookUrl, source.skill.todoWebhook, {
         todoId,
+        groupId,
         messageId: triggerMessageId,
         sourceName: source.name,
         sender,

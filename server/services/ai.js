@@ -167,7 +167,7 @@ class AIService {
    * @param {Object} params - { sender, sourceName, senderHistory, aiReply, existingTodos, newTodoSummary }
    * @returns {string|null} merged todo text, or null on failure
    */
-  async mergeTodos({ sender, sourceName, senderHistory, aiReply, existingTodos, newTodoSummary }) {
+  async mergeTodos({ sender, groupId, sourceName, senderHistory, aiReply, existingTodos, newTodoSummary }) {
     const model = this.getActiveModel()
     if (!model || !model.apiKey) return newTodoSummary || null
 
@@ -178,6 +178,8 @@ class AIService {
       '你是一个智能待办事项管理助手。',
       '请根据提供的发言记录、AI回复和现有待办事项，生成一份合并后的待办事项总结。',
       '',
+      '重要：所有内容都来自同一个群聊（groupId: ' + groupId + '），请仅针对该群聊生成待办事项，不要与其他群聊的内容混淆。',
+      '',
       '合并规则：',
       '1. 保留所有未完成的历史待办事项',
       '2. 将新产生的待办内容合并进去，去除重复或已解决的条目',
@@ -187,7 +189,7 @@ class AIService {
     ].join('\n')
 
     const parts = []
-    parts.push(`群组：${sourceName}`)
+    parts.push(`群聊：${sourceName}（groupId: ${groupId}）`)
     parts.push(`联系人：${sender}`)
     parts.push('')
 
