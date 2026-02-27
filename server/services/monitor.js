@@ -1,9 +1,9 @@
 /**
- * Message Monitor Service (Simplified)
- * - No category classification — AI uses skill.prompt directly
- * - Fixed deduplication key consistency
- * - Records messages even when autoReply is off (monitoring-only mode)
- * - Detailed logging for diagnosis
+ * Message Monitor Service
+ * - Dual-track polling: fast (random 2.03–10.87 s) + full-scan (random 36.36–100.69 s)
+ * - Active only on Beijing-time weekdays (Mon–Fri) 09:00–20:00
+ * - Full-scan reads (unread + 20) messages, capped at actual available count
+ * - Dedup by first DEDUP_LEN chars, consistent across store and lookup
  */
 import { v4 as uuidv4 } from 'uuid'
 import browserService from './browser.js'
@@ -12,15 +12,38 @@ import { sourcesDB, messagesDB, todosDB } from '../db.js'
 
 const DEDUP_LEN = 80 // chars used for dedup key — must be consistent
 
+// ── Polling timing constants (ms) ───────────────────────────────────────────
+const FAST_MIN_MS  =  2030   // 2.03 s
+const FAST_MAX_MS  = 10870   // 10.87 s
+const FULL_MIN_MS  = 36360   // 36.36 s
+const FULL_MAX_MS  = 100690  // 100.69 s
+const FULL_EXTRA_MSGS = 20   // extra messages beyond unread count for full scan
+
+function randBetween(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min
+}
+
+/**
+ * Returns true if the current moment falls within the active monitoring window:
+ * Beijing time (UTC+8), Monday–Friday, 09:00–20:00.
+ */
+function isWithinWorkingHours() {
+  const nowBeijing = new Date(Date.now() + 8 * 60 * 60 * 1000) // UTC → CST
+  const dayOfWeek  = nowBeijing.getUTCDay()   // 0=Sun, 1=Mon … 6=Sat
+  const hour       = nowBeijing.getUTCHours() // 0–23 in Beijing time
+
+  const isWeekday  = dayOfWeek >= 1 && dayOfWeek <= 5
+  const isWorkHour = hour >= 9 && hour < 20
+
+  return isWeekday && isWorkHour
+}
+
 class MonitorService {
   constructor() {
-    this.isRunning = false
-    this.pollInterval = null
-    this.wsClients = new Set()
-    this.pollIntervalMs = 5000
-    this.pollCount = 0            // tracks poll rounds
-    this.fullScanEvery = 6        // full scan every N polls (~30s)
-    this.RECENT_MSG_COUNT = 15    // how many recent messages to check per scan
+    this.isRunning    = false
+    this.fastTimer    = null   // fast-poll setTimeout handle
+    this.fullTimer    = null   // full-scan setTimeout handle
+    this.wsClients    = new Set()
   }
 
   addWSClient(ws) {
@@ -35,94 +58,143 @@ class MonitorService {
     })
   }
 
+  // ── Lifecycle ──────────────────────────────────────────────────────────────
+
   async start() {
     if (this.isRunning) return
     this.isRunning = true
-    console.log('[Monitor] Started monitoring...')
-    this.pollInterval = setInterval(() => this._poll(), this.pollIntervalMs)
+    console.log('[Monitor] Started — fast poll every ~2–11 s, full scan every ~36–101 s')
+    console.log('[Monitor] Active window: Mon–Fri 09:00–20:00 Beijing time')
+    this._scheduleFast()
+    this._scheduleFull()
   }
 
   stop() {
     this.isRunning = false
-    if (this.pollInterval) {
-      clearInterval(this.pollInterval)
-      this.pollInterval = null
-    }
-    console.log('[Monitor] Stopped monitoring.')
+    if (this.fastTimer) { clearTimeout(this.fastTimer); this.fastTimer = null }
+    if (this.fullTimer) { clearTimeout(this.fullTimer); this.fullTimer = null }
+    console.log('[Monitor] Stopped.')
   }
 
-  async _poll() {
+  // ── Scheduling helpers ─────────────────────────────────────────────────────
+
+  _scheduleFast() {
     if (!this.isRunning) return
-    this.pollCount++
+    const delay = randBetween(FAST_MIN_MS, FAST_MAX_MS)
+    this.fastTimer = setTimeout(async () => {
+      await this._fastPoll()
+      this._scheduleFast()  // re-schedule with a new random delay
+    }, delay)
+  }
+
+  _scheduleFull() {
+    if (!this.isRunning) return
+    const delay = randBetween(FULL_MIN_MS, FULL_MAX_MS)
+    this.fullTimer = setTimeout(async () => {
+      await this._fullScan()
+      this._scheduleFull()  // re-schedule with a new random delay
+    }, delay)
+  }
+
+  // ── Working-hours gate ─────────────────────────────────────────────────────
+
+  _checkWorkingHours(label) {
+    if (!isWithinWorkingHours()) {
+      const nowBJ = new Date(Date.now() + 8 * 60 * 60 * 1000)
+      const timeStr = nowBJ.toISOString().slice(11, 19)
+      const days = ['日', '一', '二', '三', '四', '五', '六']
+      const day = days[nowBJ.getUTCDay()]
+      console.log(`[Monitor] ${label} skipped — outside working hours (周${day} ${timeStr} BJ)`)
+      return false
+    }
+    return true
+  }
+
+  // ── Fast poll: detect unread badges only ──────────────────────────────────
+
+  async _fastPoll() {
+    if (!this.isRunning) return
+    if (!this._checkWorkingHours('Fast poll')) return
 
     try {
       const loginStatus = await browserService.checkLoginStatus()
-      if (!loginStatus.loggedIn) {
-        console.log('[Monitor] Not logged in, skipping poll')
-        return
-      }
+      if (!loginStatus.loggedIn) return
 
       const sources = sourcesDB.findAll().filter(s => s.enabled !== false)
       if (sources.length === 0) return
 
-      const sourceNames = sources.map(s => s.name)
-      const isFullScan = (this.pollCount % this.fullScanEvery === 0)
-
-      // ── Phase 1: Quick check — find chats with unread badges ─────────
+      const sourceNames     = sources.map(s => s.name)
       const chatsWithUnread = await browserService.checkNewMessages(sourceNames)
-      const urgentNames = new Set(chatsWithUnread.map(c => c.name))
+      if (chatsWithUnread.length === 0) return
 
-      // ── Phase 2: Build processing list ───────────────────────────────
-      // Always process chats with unread; on full-scan rounds, process ALL sources
-      let toProcess = []
-
-      for (const source of sources) {
-        const hasUnread = chatsWithUnread.find(c =>
-          c.name === source.name || c.name.includes(source.name) || source.name.includes(c.name)
+      let didOpenChat = false
+      for (const chat of chatsWithUnread) {
+        const source = sources.find(s =>
+          s.name === chat.name || chat.name.includes(s.name) || s.name.includes(chat.name)
         )
-        if (hasUnread) {
-          toProcess.push({ source, reason: 'unread', unread: hasUnread.unread })
-        } else if (isFullScan) {
-          toProcess.push({ source, reason: 'fullscan', unread: 0 })
+        if (source) {
+          const found = await this._scanSource(source, chat.unread, 'fast')
+          if (found > 0) didOpenChat = true
         }
       }
 
-      if (toProcess.length === 0) return
+      if (didOpenChat) await browserService.navigateAway()
+    } catch (err) {
+      console.error('[Monitor] Fast poll error:', err)
+    }
+  }
 
-      if (isFullScan) {
-        console.log(`[Monitor] Full scan #${this.pollCount}: ${toProcess.length} sources`)
-      }
+  // ── Full scan: check ALL sources regardless of unread badge ───────────────
 
-      // ── Phase 3: Process each source ─────────────────────────────────
+  async _fullScan() {
+    if (!this.isRunning) return
+    if (!this._checkWorkingHours('Full scan')) return
+
+    try {
+      const loginStatus = await browserService.checkLoginStatus()
+      if (!loginStatus.loggedIn) return
+
+      const sources = sourcesDB.findAll().filter(s => s.enabled !== false)
+      if (sources.length === 0) return
+
+      // Get current unread counts to determine scan depth
+      const sourceNames     = sources.map(s => s.name)
+      const chatsWithUnread = await browserService.checkNewMessages(sourceNames)
+
+      console.log(`[Monitor] Full scan: ${sources.length} source(s)`)
+
       let didOpenChat = false
-      for (const { source, reason, unread } of toProcess) {
-        const found = await this._scanSource(source, unread)
+      for (const source of sources) {
+        const unreadEntry = chatsWithUnread.find(c =>
+          c.name === source.name || c.name.includes(source.name) || source.name.includes(c.name)
+        )
+        const unreadCount = unreadEntry?.unread || 0
+        const found = await this._scanSource(source, unreadCount, 'full')
         if (found > 0) didOpenChat = true
       }
 
-      // ── Phase 4: Navigate away so future messages get unread badges ──
-      if (didOpenChat) {
-        await browserService.navigateAway()
-      }
+      if (didOpenChat) await browserService.navigateAway()
     } catch (err) {
-      console.error('[Monitor] Poll error:', err)
+      console.error('[Monitor] Full scan error:', err)
     }
   }
 
   /**
    * Scan a single source for new messages.
-   * Always reads the last RECENT_MSG_COUNT messages and uses dedup to find new ones.
+   * - fast mode: reads (unread + FULL_EXTRA_MSGS) messages
+   * - full mode: reads (unread + FULL_EXTRA_MSGS) messages (same formula, deeper context)
    * Returns number of new messages processed.
    */
-  async _scanSource(source, hintUnread) {
+  async _scanSource(source, unreadCount = 0, mode = 'fast') {
     try {
       const messages = await browserService.getMessages(source.name)
       if (!messages || messages.length === 0) return 0
 
-      // Take the last N messages from others — do NOT rely solely on unread count
       const otherMessages = messages.filter(m => m.type === 'other')
-      const scanCount = Math.max(this.RECENT_MSG_COUNT, hintUnread || 0)
-      const recentMessages = otherMessages.slice(-scanCount)
+
+      // Scan depth: unread count + extra buffer, capped at actual available messages
+      const scanCount    = unreadCount + FULL_EXTRA_MSGS
+      const recentMessages = otherMessages.slice(-Math.min(scanCount, otherMessages.length))
 
       let newCount = 0
 
