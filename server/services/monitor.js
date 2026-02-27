@@ -211,6 +211,14 @@ class MonitorService {
 
         const today = new Date().toISOString().split('T')[0]
         let aiResult = { text: '', todoSummary: null }
+        let shouldReply = false
+
+        // ── Collect sender context (36h history + current todos) ────────
+        const senderHistory = this._getSenderHistory(source.name, msg.sender)
+        const senderTodos   = this._getSenderTodos(source.name, msg.sender)
+        if (senderHistory.length > 0) {
+          console.log(`[Monitor] Sender history: ${senderHistory.length} msg(s) from "${msg.sender}" in 36h`)
+        }
 
         // ── Generate AI reply (only if autoReply enabled) ───────────────
         if (source.skill?.autoReply) {
@@ -221,7 +229,7 @@ class MonitorService {
               ? r.split(/[；;]/).map(s => s.trim()).filter(Boolean)
               : [r]
           )
-          const shouldReply = replyTo.includes('*') || replyTo.includes(msg.sender)
+          shouldReply = replyTo.includes('*') || replyTo.includes(msg.sender)
 
           if (shouldReply) {
             aiResult = await aiService.generateReply({
@@ -229,7 +237,9 @@ class MonitorService {
               sender: msg.sender,
               sourceName: source.name,
               skill: source.skill,
-              recentMessages: messages.slice(-10)
+              recentMessages: messages.slice(-10),
+              senderHistory,   // 36h sender history (≤20 items)
+              senderTodos      // sender's current + unfinished todos
             })
             console.log(`[Monitor] AI reply: "${aiResult.text?.substring(0, 60)}"`)
           } else {
@@ -268,48 +278,28 @@ class MonitorService {
           }
         }
 
-        // ── Create todo if AI returned a summary ────────────────────────
-        if (aiResult.todoSummary) {
+        // ── Merge and upsert sender's consolidated todo ─────────────────
+        // Triggers when: autoReply is on AND sender is in replyTo list
+        // AND there's something to merge (new summary or existing todos)
+        if (shouldReply && (aiResult.todoSummary || senderTodos.length > 0)) {
           record.hasTodo = true
-          const todoId = uuidv4()
-          todosDB.insert({
-            id: todoId,
-            sourceName: source.name,
-            messageId: record.id,
-            content: aiResult.todoSummary,
-            category: '待办事项',
-            completed: false,
-            isHistorical: false,
-            date: today,
-            completedAt: null
-          })
-          console.log(`[Monitor] Todo created: "${aiResult.todoSummary}"`)
-
-          // ── Call internal todo webhook (if configured) ──────────────
-          const webhookUrl = source.skill?.todoWebhook?.url
-          if (webhookUrl) {
-            this._callTodoWebhook(webhookUrl, source.skill.todoWebhook, {
-              todoId,
-              messageId: record.id,
-              sourceName: source.name,
-              sender: msg.sender,
-              senderTime: record.senderTime,
-              originalMessage: msg.content,
-              summary: aiResult.todoSummary,
-              reply: aiResult.text || '',
-              date: today,
-              timestamp: new Date().toISOString()
-            }).catch(err => console.error('[Webhook] Todo webhook failed:', err.message))
-          }
+          this._mergeSenderTodos({
+            source,
+            sender: msg.sender,
+            senderHistory,
+            aiReply: aiResult.text,
+            senderTodos,
+            newTodoSummary: aiResult.todoSummary,
+            triggerMessageId: record.id,
+            today
+          }).catch(err => console.error('[Monitor] _mergeSenderTodos error:', err.message))
         }
 
         messagesDB.insert(record)
 
         // ── WebSocket broadcast ─────────────────────────────────────────
         this.broadcast('new_message', record)
-        if (record.hasTodo) {
-          this.broadcast('new_todo', { sourceName: source.name, content: aiResult.todoSummary })
-        }
+        // note: new_todo broadcast is handled inside _mergeSenderTodos()
       }
 
       if (newCount > 0) {
@@ -319,6 +309,104 @@ class MonitorService {
     } catch (err) {
       console.error('[Monitor] _scanSource error:', err)
       return 0
+    }
+  }
+
+  // ── Sender-context helpers ──────────────────────────────────────────────────
+
+  /**
+   * Get up to 20 messages from a specific sender in a source, within the last 36 hours.
+   * Uses createdAt (reliable) as the primary timestamp.
+   */
+  _getSenderHistory(sourceName, sender) {
+    const cutoff = new Date(Date.now() - 36 * 60 * 60 * 1000).toISOString()
+    const all = messagesDB.findAll({ sourceName, sender })
+    const recent = all
+      .filter(m => {
+        const t = m.createdAt || m.senderTime || ''
+        return t >= cutoff
+      })
+      .sort((a, b) => {
+        const ta = a.createdAt || a.senderTime || ''
+        const tb = b.createdAt || b.senderTime || ''
+        return ta.localeCompare(tb)
+      })
+    return recent.slice(-20) // cap at 20 per requirement
+  }
+
+  /**
+   * Get today's todos + all unfinished historical todos for a sender in a source.
+   */
+  _getSenderTodos(sourceName, sender) {
+    const today = new Date().toISOString().split('T')[0]
+    return todosDB.findAll({ sourceName, sender })
+      .filter(t => t.date === today || !t.completed)
+  }
+
+  /**
+   * Ask AI to merge all sender context into a single consolidated todo summary,
+   * then upsert (update existing or create new) the sender's todo entry.
+   * Also fires the webhook if configured.
+   */
+  async _mergeSenderTodos({ source, sender, senderHistory, aiReply, senderTodos, newTodoSummary, triggerMessageId, today }) {
+    const mergedContent = await aiService.mergeTodos({
+      sender,
+      sourceName: source.name,
+      senderHistory,
+      aiReply,
+      existingTodos: senderTodos,
+      newTodoSummary
+    })
+
+    if (!mergedContent) return
+
+    // Upsert: one active (not completed) todo per sender per source
+    const existing = todosDB.findAll({ sourceName: source.name, sender })
+      .find(t => !t.completed)
+
+    let todoId
+    if (existing) {
+      todoId = existing.id
+      todosDB.update(existing.id, {
+        content: mergedContent,
+        date: today,
+        messageId: triggerMessageId,
+        isHistorical: false
+      })
+      console.log(`[Monitor] Todo merged for "${sender}": "${mergedContent.substring(0, 60)}"`)
+    } else {
+      todoId = uuidv4()
+      todosDB.insert({
+        id: todoId,
+        sourceName: source.name,
+        sender,
+        messageId: triggerMessageId,
+        content: mergedContent,
+        category: '待办事项',
+        completed: false,
+        isHistorical: false,
+        date: today,
+        completedAt: null
+      })
+      console.log(`[Monitor] Todo created for "${sender}": "${mergedContent.substring(0, 60)}"`)
+    }
+
+    // Broadcast to frontend
+    this.broadcast('new_todo', { sourceName: source.name, sender, content: mergedContent })
+
+    // ── Fire webhook if configured ──────────────────────────────────
+    const webhookUrl = source.skill?.todoWebhook?.url
+    if (webhookUrl) {
+      this._callTodoWebhook(webhookUrl, source.skill.todoWebhook, {
+        todoId,
+        messageId: triggerMessageId,
+        sourceName: source.name,
+        sender,
+        summary: mergedContent,
+        reply: aiReply || '',
+        date: today,
+        timestamp: new Date().toISOString()
+      }).catch(err => console.error('[Webhook] Todo webhook failed:', err.message))
     }
   }
 

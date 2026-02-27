@@ -1,62 +1,10 @@
 /**
- * AI Model Service (Enhanced)
- * - AI-powered message classification
- * - Category-specific reply strategies
- * - Structured JSON output with todoSummary
+ * AI Model Service (Simplified)
+ * - Uses skill.prompt directly as the system context
+ * - No category classification, no strategy templates
+ * - Returns { text, todoSummary } — AI can optionally return JSON
  */
 import { modelsDB, settingsDB } from '../db.js'
-
-// ─── Category Strategies ─────────────────────────────────────────────────────
-
-const CATEGORY_STRATEGIES = {
-  '日常沟通': {
-    description: '日常闲聊、问候、简短交流',
-    shouldCreateTodo: false,
-    replyStyle: '轻松自然、简短有礼',
-    guidelines: [
-      '回复控制在20-60字',
-      '保持轻松友好的语气',
-      '不需要展开过多内容',
-      '适当使用语气词让回复更自然'
-    ]
-  },
-  '业务咨询': {
-    description: '产品/服务/价格/方案的咨询与问答',
-    shouldCreateTodo: false,
-    replyStyle: '专业清晰、有条理',
-    guidelines: [
-      '回复控制在50-150字',
-      '给出明确的信息或方向',
-      '如果需要时间确认，告知对方预计回复时间',
-      '涉及报价时说明会单独确认',
-      '保持专业但不失亲和'
-    ]
-  },
-  '事项跟进': {
-    description: '之前事项的进度询问、确认、催促',
-    shouldCreateTodo: true,
-    replyStyle: '负责明确、给出时间节点',
-    guidelines: [
-      '回复控制在40-120字',
-      '明确告知当前状态或下一步动作',
-      '如可能给出具体时间承诺',
-      '表达对事项的重视',
-      '避免模糊的"尽快"类回复'
-    ]
-  },
-  '新事项登记': {
-    description: '新的任务、需求、请求、安排',
-    shouldCreateTodo: true,
-    replyStyle: '积极回应、确认收到',
-    guidelines: [
-      '回复控制在30-100字',
-      '明确确认已收到并会处理',
-      '简要复述关键要求确保理解正确',
-      '如可能给出初步安排时间',
-      '让对方放心事项已被记录'
-    ]
-  }
-}
 
 class AIService {
   /**
@@ -73,99 +21,40 @@ class AIService {
   }
 
   /**
-   * AI-powered message classification
-   * Falls back to keyword matching if AI is unavailable
-   * @param {string} content - message text
-   * @param {Object} skill - source skill config
-   * @returns {string} category name
-   */
-  async classifyMessage(content, skill) {
-    if (!content) return '日常沟通'
-
-    // Try AI classification first
-    const model = this.getActiveModel()
-    if (model && model.apiKey) {
-      try {
-        const systemPrompt = `你是一个消息分类器。将微信消息分成以下4类之一，只返回类别名称，不要任何额外文字：
-- 日常沟通：日常闲聊、问候、感谢、简短交流
-- 业务咨询：产品/服务/价格/方案/合同的咨询与问答
-- 事项跟进：之前事项的进度询问、确认、催促、更新
-- 新事项登记：新的任务、需求、请求、安排、立项`
-
-        const userMessage = `请分类以下消息：\n${content}`
-        const result = await this._callModel(model, systemPrompt, userMessage)
-        const trimmed = result.trim()
-
-        // Validate it's one of the 4 categories
-        if (['日常沟通', '业务咨询', '事项跟进', '新事项登记'].includes(trimmed)) {
-          console.log(`[AI] Classified as "${trimmed}": ${content.substring(0, 40)}...`)
-          return trimmed
-        }
-      } catch (err) {
-        console.error('[AI] Classification failed, using keyword fallback:', err.message)
-      }
-    }
-
-    // Keyword fallback
-    return this._keywordClassify(content, skill)
-  }
-
-  /**
-   * Keyword-based classification fallback
-   */
-  _keywordClassify(content, skill) {
-    const text = content.toLowerCase()
-    const keywords = skill?.classifyKeywords || {}
-
-    if (keywords.business?.some(k => text.includes(k)) ||
-        /报价|合同|方案|需求|咨询|价格|服务|产品/.test(text)) {
-      return '业务咨询'
-    }
-    if (keywords.followup?.some(k => text.includes(k)) ||
-        /进度|跟进|更新|状态|完成了吗|什么时候|怎么样了/.test(text)) {
-      return '事项跟进'
-    }
-    if (keywords.newItem?.some(k => text.includes(k)) ||
-        /新项目|新需求|安排|登记|立项|开始|麻烦.*处理/.test(text)) {
-      return '新事项登记'
-    }
-    return '日常沟通'
-  }
-
-  /**
-   * Generate a reply with category-specific strategy
-   * Returns structured result: { text, todoSummary, category }
-   * @param {Object} params - { message, sender, sourceName, category, skill, recentMessages }
+   * Generate a reply using the skill prompt + active AI model
+   * @param {Object} params - { message, sender, sourceName, skill, recentMessages, senderHistory, senderTodos }
    * @returns {{ text: string, todoSummary: string|null }}
    */
-  async generateReply(params) {
+  async generateReply({ message, sender, sourceName, skill, recentMessages, senderHistory = [], senderTodos = [] }) {
     const model = this.getActiveModel()
     if (!model || !model.apiKey) {
+      console.warn('[AI] No active model configured with API key')
       return { text: '', todoSummary: null }
     }
 
-    const { category } = params
-    const strategy = CATEGORY_STRATEGIES[category] || CATEGORY_STRATEGIES['日常沟通']
+    const systemPrompt = this._buildSystemPrompt(skill, sourceName)
+    const userMessage = this._buildUserMessage({ message, sender, recentMessages, senderHistory, senderTodos })
 
-    const systemPrompt = this._buildStrategyPrompt(params, strategy)
-    const userMessage = this._buildContextMessage(params)
+    console.log(`[AI] Calling ${model.name} (${model.model}) for "${sourceName}"`)
 
     try {
       const raw = await this._callModel(model, systemPrompt, userMessage)
+      if (!raw) return { text: '', todoSummary: null }
 
-      // Try to parse as JSON (structured response)
+      // Try to parse as JSON (AI can optionally return structured response)
       try {
         const parsed = JSON.parse(raw)
-        return {
-          text: (parsed.reply || parsed.text || raw).trim(),
-          todoSummary: parsed.todoSummary || parsed.todo || null
+        if (parsed.reply) {
+          return {
+            text: parsed.reply.trim(),
+            todoSummary: parsed.todoSummary || null
+          }
         }
-      } catch {
-        // Plain text response
-        return { text: raw.trim(), todoSummary: strategy.shouldCreateTodo ? `[${params.sender}] ${params.message.substring(0, 60)}` : null }
-      }
+      } catch { /* not JSON, use as plain text */ }
+
+      return { text: raw.trim(), todoSummary: null }
     } catch (err) {
-      console.error(`[AI] Reply generation failed (${model.provider}/${model.model}):`, err.message)
+      console.error(`[AI] generateReply failed (${model.provider}/${model.model}):`, err.message)
       return { text: '', todoSummary: null }
     }
   }
@@ -180,10 +69,14 @@ class AIService {
 
     const start = Date.now()
     try {
-      const reply = await this._callModel(model, '你是一个助手，请用一句话回答用户。', '你好，测试连接。请回复"连接成功"。')
+      const reply = await this._callModel(
+        model,
+        '你是一个助手，请用一句话回答用户。',
+        '你好，测试连接。请回复"连接成功"。'
+      )
       return {
         success: true,
-        message: `连接成功！模型回复：${reply.substring(0, 60)}`,
+        message: `连接成功！模型回复：${reply.substring(0, 80)}`,
         latencyMs: Date.now() - start
       }
     } catch (err) {
@@ -191,85 +84,162 @@ class AIService {
     }
   }
 
-  // ─── Strategy Prompt Builder ──────────────────────────────────────────────────
+  // ─── Prompt Builder ───────────────────────────────────────────────────────────
 
-  _buildStrategyPrompt({ sourceName, category, skill }, strategy) {
-    const tone = skill?.tone || '专业友好'
-    const attitude = skill?.attitude || '积极主动'
-    const templates = skill?.replyTemplates || {}
+  _buildSystemPrompt(skill, sourceName) {
+    const lines = []
 
-    let lines = [
-      `你是一个微信消息助手，负责代替用户回复来自"${sourceName}"的消息。`,
-      '',
-      `【当前消息类别】${category}`,
-      `【类别说明】${strategy.description}`,
-      `【回复风格】${strategy.replyStyle}`,
-      `【语气要求】${tone}`,
-      `【态度要求】${attitude}`,
-      '',
-      '【回复指引】'
-    ]
+    lines.push(`你是一个微信消息助手，负责代替用户回复来自"${sourceName}"的消息。`)
+    lines.push('')
 
-    strategy.guidelines.forEach(g => lines.push(`- ${g}`))
+    // User's custom prompt (the skill whiteboard)
+    const customPrompt = skill?.prompt?.trim()
+    if (customPrompt) {
+      lines.push(customPrompt)
+    } else {
+      lines.push('请根据消息内容，以自然友好的语气生成简短的回复。')
+    }
 
-    // Add terminology
+    // Terminology
     if (skill?.terminology && Object.keys(skill.terminology).length > 0) {
-      lines.push('', '【专业术语映射】')
+      lines.push('')
+      lines.push('专业术语替换：')
       Object.entries(skill.terminology).forEach(([k, v]) => {
-        lines.push(`- "${k}" → "${v}"`)
+        lines.push(`- "${k}" 替换为 "${v}"`)
       })
     }
 
-    // Add template reference
-    const templateMap = { '业务咨询': 'business', '事项跟进': 'followup', '新事项登记': 'newItem', '日常沟通': 'daily' }
-    const tplKey = templateMap[category] || 'daily'
-    if (templates[tplKey]) {
-      lines.push('', `【参考模板（可灵活改写）】${templates[tplKey]}`)
-    }
-
-    // Response format instructions
-    if (strategy.shouldCreateTodo) {
-      lines.push(
-        '',
-        '【输出格式】请以 JSON 格式返回，包含两个字段：',
-        '- reply: 回复内容文本',
-        '- todoSummary: 待办事项摘要（简短描述需要跟进/处理的事项，20-40字）',
-        '',
-        '示例输出：',
-        '{"reply": "收到，我会在今天下午确认项目进度后回复您。", "todoSummary": "确认XX项目进度并回复张三"}'
-      )
-    } else {
-      lines.push(
-        '',
-        '【输出格式】直接返回回复文本，不要加引号、前缀或说明。'
-      )
-    }
+    // Optional JSON output instruction
+    lines.push('')
+    lines.push('【可选】如果此消息需要创建待办事项，请以 JSON 格式返回：')
+    lines.push('{"reply": "回复内容", "todoSummary": "待办摘要（20-40字）"}')
+    lines.push('否则，直接返回回复文本即可，不需要任何包装。')
 
     return lines.join('\n')
   }
 
-  _buildContextMessage({ message, sender, recentMessages }) {
-    let parts = []
+  _buildUserMessage({ message, sender, recentMessages, senderHistory = [], senderTodos = [] }) {
+    const parts = []
 
-    // Add recent context if available
-    if (recentMessages && recentMessages.length > 0) {
-      parts.push('【近期对话记录】')
-      recentMessages.slice(-5).forEach(m => {
-        const role = m.type === 'me' ? '我' : m.sender || '对方'
-        parts.push(`${role}: ${m.content}`)
+    // ── Sender's 36-hour message history (most important context) ──────────────
+    if (senderHistory.length > 0) {
+      parts.push(`【${sender} 近36小时发言汇总（共${senderHistory.length}条，最新在最后）】`)
+      senderHistory.forEach(m => {
+        // Use createdAt as reliable timestamp; trim to minute precision
+        const raw = m.createdAt || m.senderTime || ''
+        const timeStr = raw ? raw.substring(0, 16).replace('T', ' ') : ''
+        const content = m.senderContentFull || m.senderContent || ''
+        parts.push(timeStr ? `[${timeStr}] ${content}` : content)
       })
       parts.push('')
     }
 
-    parts.push(`${sender} 发来新消息：`)
+    // ── Sender's pending todos ──────────────────────────────────────────────────
+    if (senderTodos.length > 0) {
+      parts.push(`【${sender} 当前待办事项】`)
+      senderTodos.forEach(t => {
+        const status = t.completed ? '✅已完成' : '⏳待处理'
+        const dateStr = t.date ? ` (${t.date})` : ''
+        parts.push(`${status}${dateStr}：${t.content}`)
+      })
+      parts.push('')
+    }
+
+    // ── General recent chat context (last 6 messages) ──────────────────────────
+    if (recentMessages && recentMessages.length > 0) {
+      parts.push('【群内近期对话上下文（最新的在最后）】')
+      recentMessages.slice(-6).forEach(m => {
+        const role = m.type === 'me' ? '我' : (m.sender || '对方')
+        if (m.content) parts.push(`${role}: ${m.content}`)
+      })
+      parts.push('')
+    }
+
+    parts.push(`${sender} 最新消息：`)
     parts.push(message)
-    parts.push('')
-    parts.push('请生成回复：')
 
     return parts.join('\n')
   }
 
-  // ─── Unified Model Caller ───────────────────────────────────────────────────
+  /**
+   * Ask AI to merge sender's message history + AI reply + existing todos
+   * into a single consolidated todo summary for the sender.
+   * @param {Object} params - { sender, sourceName, senderHistory, aiReply, existingTodos, newTodoSummary }
+   * @returns {string|null} merged todo text, or null on failure
+   */
+  async mergeTodos({ sender, sourceName, senderHistory, aiReply, existingTodos, newTodoSummary }) {
+    const model = this.getActiveModel()
+    if (!model || !model.apiKey) return newTodoSummary || null
+
+    // Nothing to merge — skip the API call
+    if (!newTodoSummary && existingTodos.length === 0) return null
+
+    const systemPrompt = [
+      '你是一个智能待办事项管理助手。',
+      '请根据提供的发言记录、AI回复和现有待办事项，生成一份合并后的待办事项总结。',
+      '',
+      '合并规则：',
+      '1. 保留所有未完成的历史待办事项',
+      '2. 将新产生的待办内容合并进去，去除重复或已解决的条目',
+      '3. 结合 AI 回复的内容，判断是否有新的待办或待跟进事项',
+      '4. 输出格式：纯文本，每条待办以"- "开头，100-300字以内',
+      '5. 只输出待办事项摘要，不要输出任何解释或说明'
+    ].join('\n')
+
+    const parts = []
+    parts.push(`群组：${sourceName}`)
+    parts.push(`联系人：${sender}`)
+    parts.push('')
+
+    if (senderHistory.length > 0) {
+      parts.push(`【${sender} 近36小时发言（${senderHistory.length}条）】`)
+      senderHistory.forEach(m => {
+        const raw = m.createdAt || m.senderTime || ''
+        const timeStr = raw ? raw.substring(0, 16).replace('T', ' ') : ''
+        const content = m.senderContentFull || m.senderContent || ''
+        parts.push(timeStr ? `[${timeStr}] ${content}` : content)
+      })
+      parts.push('')
+    }
+
+    if (aiReply) {
+      parts.push('【AI生成的回复】')
+      parts.push(aiReply)
+      parts.push('')
+    }
+
+    if (existingTodos.length > 0) {
+      parts.push('【现有待办事项（需保留未完成项）】')
+      existingTodos.forEach(t => {
+        const status = t.completed ? '✅已完成' : '⏳未完成'
+        const dateStr = t.date ? ` (${t.date})` : ''
+        parts.push(`${status}${dateStr}：${t.content}`)
+      })
+      parts.push('')
+    }
+
+    if (newTodoSummary) {
+      parts.push('【本次消息新增待办摘要】')
+      parts.push(newTodoSummary)
+      parts.push('')
+    }
+
+    parts.push(`请合并上述内容，生成 ${sender} 的最新待办事项总结：`)
+
+    const userMessage = parts.join('\n')
+
+    console.log(`[AI] mergeTodos for "${sender}" in "${sourceName}" (${existingTodos.length} existing todos)`)
+
+    try {
+      const raw = await this._callModel(model, systemPrompt, userMessage)
+      return raw?.trim() || newTodoSummary || null
+    } catch (err) {
+      console.error('[AI] mergeTodos failed:', err.message)
+      return newTodoSummary || null
+    }
+  }
+
+  // ─── Provider Dispatch ────────────────────────────────────────────────────────
 
   async _callModel(model, systemPrompt, userMessage) {
     switch (model.provider) {
@@ -303,7 +273,6 @@ class AIService {
       const err = await response.text()
       throw new Error(`HTTP ${response.status}: ${err.substring(0, 200)}`)
     }
-
     const data = await response.json()
     return data.content?.[0]?.text?.trim() || ''
   }
@@ -330,7 +299,6 @@ class AIService {
       const err = await response.text()
       throw new Error(`HTTP ${response.status}: ${err.substring(0, 200)}`)
     }
-
     const data = await response.json()
     return data.choices?.[0]?.message?.content?.trim() || ''
   }
@@ -357,7 +325,6 @@ class AIService {
       const err = await response.text()
       throw new Error(`HTTP ${response.status}: ${err.substring(0, 200)}`)
     }
-
     const data = await response.json()
     return data.choices?.[0]?.message?.content?.trim() || ''
   }
