@@ -21,6 +21,7 @@ class BrowserService {
     this.page = null
     this.isConnected = false
     this.isLoggedIn = false
+    this._myName = null      // cached display name of logged-in user
     this.userDataDir = path.join(__dirname, '..', '..', 'data', 'browser-profile')
   }
 
@@ -71,6 +72,53 @@ class BrowserService {
       return result
     } catch {
       return { loggedIn: false }
+    }
+  }
+
+  // ── Detect my display name ──────────────────────────────────────────────────
+
+  async getMyName() {
+    if (this._myName) return this._myName
+    if (!this.page) return null
+
+    try {
+      const name = await this.page.evaluate(() => {
+        // Method 1: WeChat Web header displays the logged-in user nickname
+        const sels = [
+          '.display_name', '.nickname .display_name',
+          '.header .name', '.avatar .nickname'
+        ]
+        for (const sel of sels) {
+          const el = document.querySelector(sel)
+          if (el?.textContent?.trim()) return el.textContent.trim()
+        }
+
+        // Method 2: scan messages for type='me' and grab avatar title/alt
+        const meMessages = document.querySelectorAll('.message.me')
+        for (const msg of meMessages) {
+          const avatarEl = msg.querySelector('.avatar img, .avatar')
+          const title = avatarEl?.getAttribute('title') || avatarEl?.getAttribute('alt')
+          if (title?.trim()) return title.trim()
+        }
+
+        // Method 3: check if there's a profile/settings area
+        const profileEl = document.querySelector('.account .nickname, .info .nickname')
+        if (profileEl?.textContent?.trim()) return profileEl.textContent.trim()
+
+        return null
+      }).catch(() => null)
+
+      if (name) {
+        this._myName = name
+        console.log(`[Browser] My name detected: "${name}"`)
+        return name
+      }
+
+      console.warn('[Browser] Could not detect my name')
+      return null
+    } catch (err) {
+      console.error('[Browser] getMyName error:', err.message)
+      return null
     }
   }
 
@@ -175,7 +223,8 @@ class BrowserService {
 
           // ── Sender name ───────────────────────────────────────────────
           const nickEl = msg.querySelector('.nickname') || msg.querySelector('.alias')
-          const sender = isMe ? '我' : (nickEl?.textContent?.trim() || '')
+          const senderName = nickEl?.textContent?.trim() || ''
+          const sender = isMe ? '我' : senderName
 
           // ── Determine message type by outer class first ───────────────
           // WeChat marks message type on the outer .message element itself:
@@ -223,6 +272,7 @@ class BrowserService {
           return {
             type: isSystem ? 'system' : (isMe ? 'me' : 'other'),
             sender,
+            senderName,       // real name even for 'me' messages
             content,
             hasImage
           }
@@ -331,6 +381,7 @@ class BrowserService {
     this.page = null
     this.isConnected = false
     this.isLoggedIn = false
+    this._myName = null
   }
 }
 

@@ -1,8 +1,8 @@
 /**
- * AI Model Service (Simplified)
+ * AI Model Service
  * - Uses skill.prompt directly as the system context
- * - No category classification, no strategy templates
- * - Returns { text, todoSummary } — AI can optionally return JSON
+ * - Forces JSON output: { reply, category, todoSummary }
+ * - Returns { text, category, todoSummary }
  */
 import { modelsDB, settingsDB } from '../db.js'
 
@@ -22,40 +22,57 @@ class AIService {
 
   /**
    * Generate a reply using the skill prompt + active AI model
-   * @param {Object} params - { message, sender, sourceName, skill, recentMessages, senderHistory, senderTodos }
-   * @returns {{ text: string, todoSummary: string|null }}
+   * @param {Object} params - { message, sender, sourceName, skill, recentMessages, senderHistory, senderTodos, platform }
+   * @returns {{ text: string, category: string, todoSummary: string|null }}
    */
-  async generateReply({ message, sender, sourceName, skill, recentMessages, senderHistory = [], senderTodos = [] }) {
+  async generateReply({ message, sender, sourceName, skill, recentMessages, senderHistory = [], senderTodos = [], platform = 'wechat' }) {
     const model = this.getActiveModel()
     if (!model || !model.apiKey) {
       console.warn('[AI] No active model configured with API key')
-      return { text: '', todoSummary: null }
+      return { text: '', category: '消息记录', todoSummary: null }
     }
 
-    const systemPrompt = this._buildSystemPrompt(skill, sourceName)
+    const systemPrompt = this._buildSystemPrompt(skill, sourceName, platform)
     const userMessage = this._buildUserMessage({ message, sender, recentMessages, senderHistory, senderTodos })
 
     console.log(`[AI] Calling ${model.name} (${model.model}) for "${sourceName}"`)
 
     try {
       const raw = await this._callModel(model, systemPrompt, userMessage)
-      if (!raw) return { text: '', todoSummary: null }
+      if (!raw) return { text: '', category: '消息记录', todoSummary: null }
 
-      // Try to parse as JSON (AI can optionally return structured response)
+      // Parse JSON response (forced format)
       try {
         const parsed = JSON.parse(raw)
         if (parsed.reply) {
           return {
             text: parsed.reply.trim(),
+            category: parsed.category || '消息记录',
             todoSummary: parsed.todoSummary || null
           }
         }
-      } catch { /* not JSON, use as plain text */ }
+      } catch {
+        // If not valid JSON, try to extract JSON from the text
+        const jsonMatch = raw.match(/\{[\s\S]*"reply"\s*:[\s\S]*\}/)
+        if (jsonMatch) {
+          try {
+            const parsed = JSON.parse(jsonMatch[0])
+            if (parsed.reply) {
+              return {
+                text: parsed.reply.trim(),
+                category: parsed.category || '消息记录',
+                todoSummary: parsed.todoSummary || null
+              }
+            }
+          } catch { /* still not parseable */ }
+        }
+      }
 
-      return { text: raw.trim(), todoSummary: null }
+      // Fallback: use raw text as reply
+      return { text: raw.trim(), category: '消息记录', todoSummary: null }
     } catch (err) {
       console.error(`[AI] generateReply failed (${model.provider}/${model.model}):`, err.message)
-      return { text: '', todoSummary: null }
+      return { text: '', category: '消息记录', todoSummary: null }
     }
   }
 
@@ -86,10 +103,11 @@ class AIService {
 
   // ─── Prompt Builder ───────────────────────────────────────────────────────────
 
-  _buildSystemPrompt(skill, sourceName) {
+  _buildSystemPrompt(skill, sourceName, platform = 'wechat') {
     const lines = []
 
-    lines.push(`你是一个微信消息助手，负责代替用户回复来自"${sourceName}"的消息。`)
+    const platformLabel = platform === 'yunzhijia' ? '云之家' : '微信'
+    lines.push(`你是一个${platformLabel}消息助手，负责代替用户回复来自"${sourceName}"的消息。`)
     lines.push('')
 
     // User's custom prompt (the skill whiteboard)
@@ -109,11 +127,16 @@ class AIService {
       })
     }
 
-    // Optional JSON output instruction
+    // Forced JSON output instruction
     lines.push('')
-    lines.push('【可选】如果此消息需要创建待办事项，请以 JSON 格式返回：')
-    lines.push('{"reply": "回复内容", "todoSummary": "待办摘要（20-40字）"}')
-    lines.push('否则，直接返回回复文本即可，不需要任何包装。')
+    lines.push('【输出格式要求（必须严格遵守）】')
+    lines.push('请始终以 JSON 格式返回，不要在 JSON 外添加任何文字或代码块标记：')
+    lines.push('{')
+    lines.push('  "reply": "回复内容",')
+    lines.push('  "category": "消息分类（售前咨询/项目实施/问题跟踪/商务报价/操作咨询/日常沟通/消息记录）",')
+    lines.push('  "todoSummary": "待办摘要（20-40字），无需创建待办时填 null"')
+    lines.push('}')
+    lines.push('注意：category 字段必须根据消息内容选择最合适的分类；todoSummary 仅在需要创建或更新待办事项时填写，否则为 null。')
 
     return lines.join('\n')
   }

@@ -7,10 +7,16 @@ const API = '/api'
 
 function App() {
   const [step, setStep] = useState(1) // 1=Launch, 2=Settings, 3=Dashboard
+  const [platform, setPlatform] = useState('wechat') // 'wechat' | 'yunzhijia'
   const [wechatStatus, setWechatStatus] = useState({ connected: false, loggedIn: false, monitoring: false })
+  const [yzjStatus, setYzjStatus] = useState({ connected: false, loggedIn: false, monitoring: false })
   const [sources, setSources] = useState([])
   const wsRef = useRef(null)
   const [wsMessages, setWsMessages] = useState([])
+
+  // Derive current status from active platform
+  const currentStatus = platform === 'yunzhijia' ? yzjStatus : wechatStatus
+  const apiPrefix = platform === 'yunzhijia' ? 'yunzhijia' : 'wechat'
 
   // Check initial status
   useEffect(() => {
@@ -23,8 +29,8 @@ function App() {
       }
     }).catch(() => {})
 
-    // Check wechat status periodically
-    const interval = setInterval(checkStatus, 3000)
+    // Check status for both platforms periodically
+    const interval = setInterval(checkAllStatus, 3000)
     return () => clearInterval(interval)
   }, [])
 
@@ -54,30 +60,33 @@ function App() {
     wsRef.current = ws
   }, [])
 
-  const checkStatus = async () => {
+  const checkAllStatus = async () => {
     try {
-      const res = await fetch(`${API}/wechat/status`)
-      const data = await res.json()
-      setWechatStatus(data)
+      const [wxRes, yzjRes] = await Promise.allSettled([
+        fetch(`${API}/wechat/status`).then(r => r.json()),
+        fetch(`${API}/yunzhijia/status`).then(r => r.json())
+      ])
+      if (wxRes.status === 'fulfilled') setWechatStatus(wxRes.value)
+      if (yzjRes.status === 'fulfilled') setYzjStatus(yzjRes.value)
     } catch {}
   }
 
   const handleLaunch = async () => {
     try {
-      const res = await fetch(`${API}/wechat/launch`, { method: 'POST' })
+      const res = await fetch(`${API}/${apiPrefix}/launch`, { method: 'POST' })
       const data = await res.json()
       if (data.success) {
         // Wait for user to login, poll status
         const pollLogin = setInterval(async () => {
-          const statusRes = await fetch(`${API}/wechat/status`)
+          const statusRes = await fetch(`${API}/${apiPrefix}/status`)
           const status = await statusRes.json()
-          setWechatStatus(status)
+          if (platform === 'yunzhijia') setYzjStatus(status)
+          else setWechatStatus(status)
           if (status.loggedIn) {
             clearInterval(pollLogin)
             setStep(2)
           }
         }, 2000)
-        // Timeout after 2 minutes
         setTimeout(() => clearInterval(pollLogin), 120000)
       }
       return data
@@ -89,8 +98,8 @@ function App() {
   const handleSettingsComplete = async (newSources) => {
     setSources(newSources)
     await fetch(`${API}/settings/complete-setup`, { method: 'POST' })
-    // Start monitoring
-    await fetch(`${API}/wechat/monitor/start`, { method: 'POST' })
+    // Start monitoring for current platform
+    await fetch(`${API}/${apiPrefix}/monitor/start`, { method: 'POST' })
     setStep(3)
   }
 
@@ -101,7 +110,9 @@ function App() {
       {step === 1 && (
         <LaunchPage
           onLaunch={handleLaunch}
-          status={wechatStatus}
+          status={currentStatus}
+          platform={platform}
+          onPlatformChange={setPlatform}
           onSkipToSettings={() => setStep(2)}
         />
       )}
@@ -109,14 +120,19 @@ function App() {
         <SettingsPage
           sources={sources}
           setSources={setSources}
+          platform={platform}
+          onPlatformChange={setPlatform}
           onComplete={handleSettingsComplete}
-          onBack={() => setStep(wechatStatus.loggedIn ? 3 : 1)}
+          onBack={() => setStep(currentStatus.loggedIn ? 3 : 1)}
         />
       )}
       {step === 3 && (
         <DashboardPage
           sources={sources}
-          status={wechatStatus}
+          platform={platform}
+          onPlatformChange={setPlatform}
+          wechatStatus={wechatStatus}
+          yzjStatus={yzjStatus}
           wsMessages={wsMessages}
           onGoToSettings={handleGoToSettings}
           onLaunch={handleLaunch}

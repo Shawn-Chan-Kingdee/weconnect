@@ -11,7 +11,7 @@ const DEFAULT_SKILL = {
   todoWebhook: null   // { url, method, headers, bodyTemplate }
 }
 
-export default function SettingsPage({ sources, setSources, onComplete, onBack }) {
+export default function SettingsPage({ sources, setSources, platform, onPlatformChange, onComplete, onBack }) {
   const [activeTab, setActiveTab] = useState('sources')
   const [newName, setNewName] = useState('')
   const [editingId, setEditingId] = useState(null)
@@ -26,18 +26,24 @@ export default function SettingsPage({ sources, setSources, onComplete, onBack }
   const [webhookTesting, setWebhookTesting] = useState(false)
   const [webhookTestResult, setWebhookTestResult] = useState(null)
 
+  const isYzj = platform === 'yunzhijia'
+  const platformLabel = isYzj ? '云之家' : '微信'
+
+  // Filter sources by current platform
+  const platformSources = sources.filter(s => (s.platform || 'wechat') === platform)
+
   useEffect(() => {
     fetch(`${API}/settings/sources`).then(r => r.json()).then(setSources).catch(() => {})
   }, [])
 
   const addSource = async () => {
     if (!newName.trim()) { setError('请输入名称'); return }
-    if (sources.length >= 5) { setError('最多5个消息来源'); return }
+    if (platformSources.length >= 5) { setError(`每个平台最多5个消息来源`); return }
     try {
       const res = await fetch(`${API}/settings/sources`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newName.trim() })
+        body: JSON.stringify({ name: newName.trim(), platform })
       })
       const data = await res.json()
       if (data.error) { setError(data.error); return }
@@ -189,24 +195,49 @@ export default function SettingsPage({ sources, setSources, onComplete, onBack }
         <div className="settings-body">
           {/* Left: Source List */}
           <div className="settings-sources">
-            <h2>消息来源 <span className="badge">{sources.length}/5</span></h2>
+            <h2>消息来源 <span className="badge">{platformSources.length}/5</span></h2>
+
+            {/* Platform Switcher */}
+            <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+              <button
+                onClick={() => { onPlatformChange('wechat'); setEditingId(null); setEditSkill(null) }}
+                style={{
+                  padding: '5px 14px', borderRadius: 4, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600,
+                  background: platform === 'wechat' ? '#07C160' : '#f0f0f0',
+                  color: platform === 'wechat' ? 'white' : '#666'
+                }}
+              >
+                微信
+              </button>
+              <button
+                onClick={() => { onPlatformChange('yunzhijia'); setEditingId(null); setEditSkill(null) }}
+                style={{
+                  padding: '5px 14px', borderRadius: 4, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600,
+                  background: platform === 'yunzhijia' ? '#1677FF' : '#f0f0f0',
+                  color: platform === 'yunzhijia' ? 'white' : '#666'
+                }}
+              >
+                云之家
+              </button>
+            </div>
+
             <div className="source-input-row">
               <input
                 type="text"
                 value={newName}
                 onChange={e => setNewName(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && addSource()}
-                placeholder="输入群名或联系人（需与微信显示完全一致）"
+                placeholder={`输入群名或联系人（需与${platformLabel}显示完全一致）`}
                 maxLength={50}
               />
-              <button className="btn-add" onClick={addSource} disabled={sources.length >= 5}>
+              <button className="btn-add" onClick={addSource} disabled={platformSources.length >= 5}>
                 + 添加
               </button>
             </div>
             {error && <p className="error-msg">{error}</p>}
 
             <div className="source-list">
-              {sources.map((source, idx) => (
+              {platformSources.map((source, idx) => (
                 <div
                   key={source.id}
                   className={`source-card ${editingId === source.id ? 'active' : ''}`}
@@ -228,8 +259,8 @@ export default function SettingsPage({ sources, setSources, onComplete, onBack }
                   </div>
                 </div>
               ))}
-              {sources.length === 0 && (
-                <div className="empty-hint">还没有消息来源，请在上方输入添加</div>
+              {platformSources.length === 0 && (
+                <div className="empty-hint">当前平台（{platformLabel}）还没有消息来源，请在上方输入添加</div>
               )}
             </div>
           </div>

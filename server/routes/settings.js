@@ -1,6 +1,7 @@
 /**
  * Settings & Sources Routes
  * Simplified skill structure: prompt whiteboard replaces templates/keywords
+ * Supports multi-platform: wechat | yunzhijia
  */
 import { Router } from 'express'
 import { v4 as uuidv4 } from 'uuid'
@@ -16,22 +17,30 @@ const DEFAULT_SKILL = {
   mcpService: null
 }
 
-// Get all message sources
+const VALID_PLATFORMS = ['wechat', 'yunzhijia']
+
+// Get all message sources (optional ?platform=wechat|yunzhijia filter)
 router.get('/sources', (req, res) => {
-  const sources = sourcesDB.findAll()
+  const { platform } = req.query
+  let sources = sourcesDB.findAll()
+  if (platform && VALID_PLATFORMS.includes(platform)) {
+    sources = sources.filter(s => s.platform === platform)
+  }
   res.json(sources)
 })
 
-// Add a message source (max 5)
+// Add a message source (max 5 per platform)
 router.post('/sources', (req, res) => {
-  const existing = sourcesDB.findAll()
-  if (existing.length >= 5) {
-    return res.status(400).json({ error: '最多只能配置5个消息来源' })
-  }
+  const { name, skill, platform } = req.body
+  const plat = VALID_PLATFORMS.includes(platform) ? platform : 'wechat'
 
-  const { name, skill } = req.body
   if (!name) {
     return res.status(400).json({ error: '名称不能为空' })
+  }
+
+  const existing = sourcesDB.findAll().filter(s => s.platform === plat)
+  if (existing.length >= 5) {
+    return res.status(400).json({ error: `每个平台最多只能配置5个消息来源` })
   }
 
   if (existing.find(s => s.name === name)) {
@@ -41,6 +50,7 @@ router.post('/sources', (req, res) => {
   const source = sourcesDB.insert({
     id: uuidv4(),
     name,
+    platform: plat,
     skill: { ...DEFAULT_SKILL, ...(skill || {}) },
     enabled: true
   })

@@ -22,7 +22,7 @@ function formatDateLabel(dateStr) {
   return dateStr.slice(5) // MM-DD
 }
 
-export default function DashboardPage({ sources, status, wsMessages, onGoToSettings, onLaunch }) {
+export default function DashboardPage({ sources, platform, onPlatformChange, wechatStatus, yzjStatus, wsMessages, onGoToSettings, onLaunch }) {
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0])
   const [activeTab, setActiveTab] = useState(0)
   const [messages, setMessages] = useState([])
@@ -35,29 +35,41 @@ export default function DashboardPage({ sources, status, wsMessages, onGoToSetti
   const [launchMsg, setLaunchMsg] = useState('')
   const pollRef = useRef(null)
 
+  // Current platform status
+  const status = platform === 'yunzhijia' ? yzjStatus : wechatStatus
+  const apiPrefix = platform === 'yunzhijia' ? 'yunzhijia' : 'wechat'
+  const isYzj = platform === 'yunzhijia'
+  const platformLabel = isYzj ? '云之家' : '微信'
+
+  // Filter sources by platform
+  const platformSources = sources.filter(s => (s.platform || 'wechat') === platform)
+
+  // Reset tab when switching platform
+  useEffect(() => {
+    setActiveTab(0)
+  }, [platform])
+
   const handleLaunchClick = async () => {
     if (launching) return
     setLaunching(true)
-    setLaunchMsg('正在启动浏览器...')
+    setLaunchMsg(`正在启动${platformLabel}浏览器...`)
     try {
       const result = await onLaunch()
       if (result.success) {
-        setLaunchMsg('请用手机微信扫码登录...')
-        // Poll for login, stop when logged in
+        setLaunchMsg(isYzj ? '请在浏览器中登录云之家...' : '请用手机微信扫码登录...')
         pollRef.current = setInterval(async () => {
           try {
-            const res = await fetch(`${API}/wechat/status`)
+            const res = await fetch(`${API}/${apiPrefix}/status`)
             const s = await res.json()
             if (s.loggedIn) {
               clearInterval(pollRef.current)
               setLaunchMsg('已登录，正在启动监控...')
-              await fetch(`${API}/wechat/monitor/start`, { method: 'POST' })
+              await fetch(`${API}/${apiPrefix}/monitor/start`, { method: 'POST' })
               setLaunching(false)
               setLaunchMsg('')
             }
           } catch {}
         }, 2000)
-        // Timeout 3 minutes
         setTimeout(() => {
           if (pollRef.current) {
             clearInterval(pollRef.current)
@@ -75,19 +87,18 @@ export default function DashboardPage({ sources, status, wsMessages, onGoToSetti
     }
   }
 
-  // Cleanup poll on unmount
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
 
   const fetchMessages = useCallback(async () => {
-    if (sources.length === 0) return
-    const source = sources[activeTab]
+    if (platformSources.length === 0) return
+    const source = platformSources[activeTab]
     if (!source) return
     try {
       const res = await fetch(`${API}/messages?date=${selectedDate}&source=${encodeURIComponent(source.name)}`)
       const data = await res.json()
       setMessages(data)
     } catch {}
-  }, [selectedDate, activeTab, sources])
+  }, [selectedDate, activeTab, platformSources])
 
   const fetchTodos = useCallback(async () => {
     try {
@@ -97,15 +108,9 @@ export default function DashboardPage({ sources, status, wsMessages, onGoToSetti
     } catch {}
   }, [])
 
-  useEffect(() => {
-    fetchMessages()
-  }, [fetchMessages])
+  useEffect(() => { fetchMessages() }, [fetchMessages])
+  useEffect(() => { fetchTodos() }, [fetchTodos])
 
-  useEffect(() => {
-    fetchTodos()
-  }, [fetchTodos])
-
-  // Refresh on new WebSocket messages
   useEffect(() => {
     if (wsMessages.length > 0) {
       const last = wsMessages[wsMessages.length - 1]
@@ -116,7 +121,6 @@ export default function DashboardPage({ sources, status, wsMessages, onGoToSetti
     }
   }, [wsMessages])
 
-  // Auto-refresh every 10s
   useEffect(() => {
     const iv = setInterval(() => { fetchMessages(); fetchTodos() }, 10000)
     return () => clearInterval(iv)
@@ -137,11 +141,37 @@ export default function DashboardPage({ sources, status, wsMessages, onGoToSetti
         <div className="topbar-left">
           <div className="topbar-logo">
             <svg width="28" height="28" viewBox="0 0 80 80" fill="none">
-              <rect width="80" height="80" rx="20" fill="#07C160"/>
+              <rect width="80" height="80" rx="20" fill={isYzj ? '#1677FF' : '#07C160'}/>
               <path d="M28 30C28 26 31 23 35 23H45C49 23 52 26 52 30V38C52 42 49 45 45 45H42L36 51V45H35C31 45 28 42 28 38V30Z" fill="white"/>
             </svg>
           </div>
           <span className="topbar-title">WeConnect</span>
+
+          {/* Platform Switcher */}
+          <div style={{ display: 'flex', gap: 4, marginLeft: 16, background: '#f0f0f0', borderRadius: 6, padding: 2 }}>
+            <button
+              onClick={() => onPlatformChange('wechat')}
+              style={{
+                padding: '4px 12px', borderRadius: 4, border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600,
+                background: platform === 'wechat' ? '#07C160' : 'transparent',
+                color: platform === 'wechat' ? 'white' : '#666'
+              }}
+            >
+              微信
+              {wechatStatus.monitoring && <span style={{ marginLeft: 4, fontSize: 10 }}>●</span>}
+            </button>
+            <button
+              onClick={() => onPlatformChange('yunzhijia')}
+              style={{
+                padding: '4px 12px', borderRadius: 4, border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600,
+                background: platform === 'yunzhijia' ? '#1677FF' : 'transparent',
+                color: platform === 'yunzhijia' ? 'white' : '#666'
+              }}
+            >
+              云之家
+              {yzjStatus.monitoring && <span style={{ marginLeft: 4, fontSize: 10 }}>●</span>}
+            </button>
+          </div>
 
           {/* Launch / Relaunch Button */}
           <div className="topbar-launch">
@@ -149,12 +179,12 @@ export default function DashboardPage({ sources, status, wsMessages, onGoToSetti
               <button
                 className={`btn-topbar-launch ${status.loggedIn ? 'relaunching' : 'offline'}`}
                 onClick={handleLaunchClick}
-                title={status.loggedIn ? '重新启动微信网页' : '启动微信网页版'}
+                title={status.loggedIn ? `重新启动${platformLabel}网页` : `启动${platformLabel}`}
               >
                 <span className="btn-launch-icon">
                   {status.loggedIn ? '↻' : '▶'}
                 </span>
-                {status.loggedIn ? '重启网页' : '启动网页'}
+                {status.loggedIn ? '重启网页' : `启动${platformLabel}`}
               </button>
             ) : (
               <div className="topbar-launching">
@@ -189,17 +219,23 @@ export default function DashboardPage({ sources, status, wsMessages, onGoToSetti
             ))}
           </div>
 
-          {/* Tab Selector for Sources */}
+          {/* Tab Selector for Sources (filtered by platform) */}
           <div className="source-tabs">
-            {sources.map((source, idx) => (
-              <button
-                key={source.id}
-                className={`source-tab ${activeTab === idx ? 'active' : ''}`}
-                onClick={() => setActiveTab(idx)}
-              >
-                {source.name}
-              </button>
-            ))}
+            {platformSources.length === 0 ? (
+              <div style={{ padding: '8px 16px', color: '#999', fontSize: 13 }}>
+                当前平台（{platformLabel}）暂无消息来源，请前往设置添加
+              </div>
+            ) : (
+              platformSources.map((source, idx) => (
+                <button
+                  key={source.id}
+                  className={`source-tab ${activeTab === idx ? 'active' : ''}`}
+                  onClick={() => setActiveTab(idx)}
+                >
+                  {source.name}
+                </button>
+              ))
+            )}
           </div>
 
           {/* Message Log Table */}
