@@ -22,10 +22,10 @@ class AIService {
 
   /**
    * Generate a reply using the skill prompt + active AI model
-   * @param {Object} params - { message, sender, sourceName, skill, recentMessages, senderHistory, senderTodos, platform }
+   * @param {Object} params - { message, sender, sourceName, skill, recentMessages, senderHistory, senderTodos, conversationContext, platform }
    * @returns {{ text: string, category: string, todoSummary: string|null }}
    */
-  async generateReply({ message, sender, sourceName, skill, recentMessages, senderHistory = [], senderTodos = [], platform = 'wechat' }) {
+  async generateReply({ message, sender, sourceName, skill, recentMessages, senderHistory = [], senderTodos = [], conversationContext = [], platform = 'wechat' }) {
     const model = this.getActiveModel()
     if (!model || !model.apiKey) {
       console.warn('[AI] No active model configured with API key')
@@ -33,7 +33,7 @@ class AIService {
     }
 
     const systemPrompt = this._buildSystemPrompt(skill, sourceName, platform)
-    const userMessage = this._buildUserMessage({ message, sender, recentMessages, senderHistory, senderTodos })
+    const userMessage = this._buildUserMessage({ message, sender, recentMessages, senderHistory, senderTodos, conversationContext })
 
     console.log(`[AI] Calling ${model.name} (${model.model}) for "${sourceName}"`)
 
@@ -134,21 +134,20 @@ class AIService {
     lines.push('{')
     lines.push('  "reply": "回复内容",')
     lines.push('  "category": "消息分类（售前咨询/项目实施/问题跟踪/商务报价/操作咨询/日常沟通/消息记录）",')
-    lines.push('  "todoSummary": "待办摘要（20-40字），无需创建待办时填 null"')
+    lines.push('  "todoSummary": "待办摘要（50-200字），无需创建待办时填 null"')
     lines.push('}')
     lines.push('注意：category 字段必须根据消息内容选择最合适的分类；todoSummary 仅在需要创建或更新待办事项时填写，否则为 null。')
 
     return lines.join('\n')
   }
 
-  _buildUserMessage({ message, sender, recentMessages, senderHistory = [], senderTodos = [] }) {
+  _buildUserMessage({ message, sender, recentMessages, senderHistory = [], senderTodos = [], conversationContext = [] }) {
     const parts = []
 
     // ── Sender's 36-hour message history (most important context) ──────────────
     if (senderHistory.length > 0) {
       parts.push(`【${sender} 近36小时发言汇总（共${senderHistory.length}条，最新在最后）】`)
       senderHistory.forEach(m => {
-        // Use createdAt as reliable timestamp; trim to minute precision
         const raw = m.createdAt || m.senderTime || ''
         const timeStr = raw ? raw.substring(0, 16).replace('T', ' ') : ''
         const content = m.senderContentFull || m.senderContent || ''
@@ -168,8 +167,18 @@ class AIService {
       parts.push('')
     }
 
-    // ── General recent chat context (last 6 messages) ──────────────────────────
-    if (recentMessages && recentMessages.length > 0) {
+    // ── 本轮完整对话上下文（@me触发后的所有消息+我的回复）──────────────
+    if (conversationContext.length > 0) {
+      parts.push(`【本轮完整对话记录（${sender} @我后的所有消息+我的回复）】`)
+      conversationContext.forEach(c => {
+        const timeStr = c.time ? `[${c.time}] ` : ''
+        parts.push(`${timeStr}${c.role}: ${c.content}`)
+      })
+      parts.push('')
+    }
+
+    // ── General recent chat context (last 6 messages, fallback) ─────────────
+    if (conversationContext.length === 0 && recentMessages && recentMessages.length > 0) {
       parts.push('【群内近期对话上下文（最新的在最后）】')
       recentMessages.slice(-6).forEach(m => {
         const role = m.type === 'me' ? '我' : (m.sender || '对方')
@@ -178,7 +187,7 @@ class AIService {
       parts.push('')
     }
 
-    parts.push(`${sender} 最新消息：`)
+    parts.push(`${sender} 完整发言（碎片化消息已合并）：`)
     parts.push(message)
 
     return parts.join('\n')
@@ -207,7 +216,7 @@ class AIService {
       '1. 保留所有未完成的历史待办事项',
       '2. 将新产生的待办内容合并进去，去除重复或已解决的条目',
       '3. 结合 AI 回复的内容，判断是否有新的待办或待跟进事项',
-      '4. 输出格式：纯文本，每条待办以"- "开头，100-300字以内',
+      '4. 输出格式：纯文本，每条待办以"- "开头，总长度50-200字以内',
       '5. 只输出待办事项摘要，不要输出任何解释或说明'
     ].join('\n')
 

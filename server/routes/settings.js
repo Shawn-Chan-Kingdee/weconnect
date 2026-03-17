@@ -1,7 +1,7 @@
 /**
  * Settings & Sources Routes
  * Simplified skill structure: prompt whiteboard replaces templates/keywords
- * Supports multi-platform: wechat | yunzhijia
+ * Supports multi-platform: wechat | yunzhijia | feishu
  */
 import { Router } from 'express'
 import { v4 as uuidv4 } from 'uuid'
@@ -17,7 +17,7 @@ const DEFAULT_SKILL = {
   mcpService: null
 }
 
-const VALID_PLATFORMS = ['wechat', 'yunzhijia']
+const VALID_PLATFORMS = ['wechat', 'yunzhijia', 'feishu']
 
 // Get all message sources (optional ?platform=wechat|yunzhijia filter)
 router.get('/sources', (req, res) => {

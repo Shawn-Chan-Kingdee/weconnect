@@ -3,6 +3,12 @@ import ModelSettings from '../components/ModelSettings.jsx'
 
 const API = '/api'
 
+const PLATFORM_CONFIG = {
+  wechat:    { label: '微信',   color: '#07C160' },
+  yunzhijia: { label: '云之家', color: '#1677FF' },
+  feishu:    { label: '飞书',   color: '#3370FF' }
+}
+
 const DEFAULT_SKILL = {
   autoReply: false,
   replyTo: ['*'],
@@ -26,8 +32,8 @@ export default function SettingsPage({ sources, setSources, platform, onPlatform
   const [webhookTesting, setWebhookTesting] = useState(false)
   const [webhookTestResult, setWebhookTestResult] = useState(null)
 
-  const isYzj = platform === 'yunzhijia'
-  const platformLabel = isYzj ? '云之家' : '微信'
+  const pcfg = PLATFORM_CONFIG[platform] || PLATFORM_CONFIG.wechat
+  const platformLabel = pcfg.label
 
   // Filter sources by current platform
   const platformSources = sources.filter(s => (s.platform || 'wechat') === platform)
@@ -199,26 +205,19 @@ export default function SettingsPage({ sources, setSources, platform, onPlatform
 
             {/* Platform Switcher */}
             <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
-              <button
-                onClick={() => { onPlatformChange('wechat'); setEditingId(null); setEditSkill(null) }}
-                style={{
-                  padding: '5px 14px', borderRadius: 4, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600,
-                  background: platform === 'wechat' ? '#07C160' : '#f0f0f0',
-                  color: platform === 'wechat' ? 'white' : '#666'
-                }}
-              >
-                微信
-              </button>
-              <button
-                onClick={() => { onPlatformChange('yunzhijia'); setEditingId(null); setEditSkill(null) }}
-                style={{
-                  padding: '5px 14px', borderRadius: 4, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600,
-                  background: platform === 'yunzhijia' ? '#1677FF' : '#f0f0f0',
-                  color: platform === 'yunzhijia' ? 'white' : '#666'
-                }}
-              >
-                云之家
-              </button>
+              {Object.entries(PLATFORM_CONFIG).map(([key, cfg]) => (
+                <button
+                  key={key}
+                  onClick={() => { onPlatformChange(key); setEditingId(null); setEditSkill(null) }}
+                  style={{
+                    padding: '5px 14px', borderRadius: 4, border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600,
+                    background: platform === key ? cfg.color : '#f0f0f0',
+                    color: platform === key ? 'white' : '#666'
+                  }}
+                >
+                  {cfg.label}
+                </button>
+              ))}
             </div>
 
             <div className="source-input-row">

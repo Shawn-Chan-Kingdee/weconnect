@@ -37,7 +37,11 @@ class BrowserService {
         locale: 'zh-CN',
         args: [
           '--disable-blink-features=AutomationControlled',
-          '--no-sandbox'
+          '--no-sandbox',
+          '--disable-background-timer-throttling',
+          '--disable-backgrounding-occluded-windows',
+          '--disable-renderer-backgrounding',
+          '--disable-ipc-flooding-protection'
         ]
       })
 
@@ -223,7 +227,15 @@ class BrowserService {
 
           // ── Sender name ───────────────────────────────────────────────
           const nickEl = msg.querySelector('.nickname') || msg.querySelector('.alias')
-          const senderName = nickEl?.textContent?.trim() || ''
+          let senderName = nickEl?.textContent?.trim() || ''
+
+          // Fallback: avatar title/alt
+          if (!senderName) {
+            const avatarEl = msg.querySelector('.avatar img') || msg.querySelector('.avatar')
+            senderName = avatarEl?.getAttribute('title')?.trim() ||
+                         avatarEl?.getAttribute('alt')?.trim() || ''
+          }
+
           const sender = isMe ? '我' : senderName
 
           // ── Determine message type by outer class first ───────────────
@@ -369,6 +381,26 @@ class BrowserService {
       console.log('[Browser] Navigated away via Escape')
     } catch (err) {
       console.error('[Browser] navigateAway error:', err.message)
+    }
+  }
+
+  /**
+   * 刷新页面，重新建立 WebSocket 连接
+   * 解决后台窗口 WebSocket 断连导致 DOM 不再更新的问题
+   */
+  async refreshPage() {
+    if (!this.page) return false
+    try {
+      console.log('[Browser] Refreshing page to re-establish WebSocket...')
+      await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 })
+      await this.page.waitForTimeout(2000) // 等待 WebSocket 重连
+      // 清除 myName 缓存，下次重新检测
+      this._myName = null
+      console.log('[Browser] Page refreshed successfully')
+      return true
+    } catch (err) {
+      console.error('[Browser] refreshPage error:', err.message)
+      return false
     }
   }
 

@@ -38,9 +38,8 @@ router.get('/dashboard', (req, res) => {
   // Today's new: created today, not marked as historical
   const todayNew = allTodos.filter(t => t.date === today && !t.isHistorical)
 
-  // Historical pending: either marked isHistorical OR from previous days and not completed
+  // Historical: either marked isHistorical OR from previous days (include completed for toggle UI)
   const historicalPending = allTodos.filter(t => {
-    if (t.completed) return false
     if (t.isHistorical) return true
     if (t.date < today) return true
     return false
@@ -49,7 +48,8 @@ router.get('/dashboard', (req, res) => {
   // Sort each group
   todayNew.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
   historicalPending.sort((a, b) => {
-    // Sort by original date descending (most recent first)
+    // Uncompleted first, then by date descending
+    if (a.completed !== b.completed) return a.completed ? 1 : -1
     const dateA = a.originalDate || a.date
     const dateB = b.originalDate || b.date
     return dateB.localeCompare(dateA)
@@ -84,10 +84,7 @@ router.put('/:id/toggle', (req, res) => {
 
   const today = new Date().toISOString().split('T')[0]
 
-  // If trying to uncomplete a historical completed item, reject
-  if (todo.completed && todo.isHistorical) {
-    return res.status(400).json({ error: '历史已办结事项不可恢复' })
-  }
+  // Historical items can now be toggled freely (same as today's items)
 
   const updated = todosDB.update(req.params.id, {
     completed: !todo.completed,

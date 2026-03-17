@@ -4,6 +4,12 @@ import TodoPanel from '../components/TodoPanel.jsx'
 
 const API = '/api'
 
+const PLATFORM_CONFIG = {
+  wechat:    { label: '微信',   color: '#07C160' },
+  yunzhijia: { label: '云之家', color: '#1677FF' },
+  feishu:    { label: '飞书',   color: '#3370FF' }
+}
+
 function getDateRange() {
   const dates = []
   for (let i = 0; i < 7; i++) {
@@ -22,12 +28,14 @@ function formatDateLabel(dateStr) {
   return dateStr.slice(5) // MM-DD
 }
 
-export default function DashboardPage({ sources, platform, onPlatformChange, wechatStatus, yzjStatus, wsMessages, onGoToSettings, onLaunch }) {
+export default function DashboardPage({ sources, platform, onPlatformChange, wechatStatus, yzjStatus, feishuStatus, wsMessages, onGoToSettings, onLaunch }) {
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0])
   const [activeTab, setActiveTab] = useState(0)
   const [messages, setMessages] = useState([])
   const [todos, setTodos] = useState({ todayNew: [], historicalPending: [] })
   const [detailMsg, setDetailMsg] = useState(null)
+  const [senderFilter, setSenderFilter] = useState(null)
+  const [highlightColor, setHighlightColor] = useState(null)
   const dateRange = getDateRange()
 
   // Launch state
@@ -36,10 +44,11 @@ export default function DashboardPage({ sources, platform, onPlatformChange, wec
   const pollRef = useRef(null)
 
   // Current platform status
-  const status = platform === 'yunzhijia' ? yzjStatus : wechatStatus
-  const apiPrefix = platform === 'yunzhijia' ? 'yunzhijia' : 'wechat'
-  const isYzj = platform === 'yunzhijia'
-  const platformLabel = isYzj ? '云之家' : '微信'
+  const statusMap = { wechat: wechatStatus, yunzhijia: yzjStatus, feishu: feishuStatus }
+  const status = statusMap[platform] || wechatStatus
+  const apiPrefix = platform === 'yunzhijia' ? 'yunzhijia' : platform === 'feishu' ? 'feishu' : 'wechat'
+  const pcfg = PLATFORM_CONFIG[platform] || PLATFORM_CONFIG.wechat
+  const platformLabel = pcfg.label
 
   // Filter sources by platform
   const platformSources = sources.filter(s => (s.platform || 'wechat') === platform)
@@ -56,7 +65,10 @@ export default function DashboardPage({ sources, platform, onPlatformChange, wec
     try {
       const result = await onLaunch()
       if (result.success) {
-        setLaunchMsg(isYzj ? '请在浏览器中登录云之家...' : '请用手机微信扫码登录...')
+        const loginMsg = platform === 'yunzhijia' ? '请在浏览器中登录云之家...'
+          : platform === 'feishu' ? '请在浏览器中登录飞书...'
+          : '请用手机微信扫码登录...'
+        setLaunchMsg(loginMsg)
         pollRef.current = setInterval(async () => {
           try {
             const res = await fetch(`${API}/${apiPrefix}/status`)
@@ -141,7 +153,7 @@ export default function DashboardPage({ sources, platform, onPlatformChange, wec
         <div className="topbar-left">
           <div className="topbar-logo">
             <svg width="28" height="28" viewBox="0 0 80 80" fill="none">
-              <rect width="80" height="80" rx="20" fill={isYzj ? '#1677FF' : '#07C160'}/>
+              <rect width="80" height="80" rx="20" fill={pcfg.color}/>
               <path d="M28 30C28 26 31 23 35 23H45C49 23 52 26 52 30V38C52 42 49 45 45 45H42L36 51V45H35C31 45 28 42 28 38V30Z" fill="white"/>
             </svg>
           </div>
@@ -149,28 +161,20 @@ export default function DashboardPage({ sources, platform, onPlatformChange, wec
 
           {/* Platform Switcher */}
           <div style={{ display: 'flex', gap: 4, marginLeft: 16, background: '#f0f0f0', borderRadius: 6, padding: 2 }}>
-            <button
-              onClick={() => onPlatformChange('wechat')}
-              style={{
-                padding: '4px 12px', borderRadius: 4, border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600,
-                background: platform === 'wechat' ? '#07C160' : 'transparent',
-                color: platform === 'wechat' ? 'white' : '#666'
-              }}
-            >
-              微信
-              {wechatStatus.monitoring && <span style={{ marginLeft: 4, fontSize: 10 }}>●</span>}
-            </button>
-            <button
-              onClick={() => onPlatformChange('yunzhijia')}
-              style={{
-                padding: '4px 12px', borderRadius: 4, border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600,
-                background: platform === 'yunzhijia' ? '#1677FF' : 'transparent',
-                color: platform === 'yunzhijia' ? 'white' : '#666'
-              }}
-            >
-              云之家
-              {yzjStatus.monitoring && <span style={{ marginLeft: 4, fontSize: 10 }}>●</span>}
-            </button>
+            {Object.entries(PLATFORM_CONFIG).map(([key, cfg]) => (
+              <button
+                key={key}
+                onClick={() => onPlatformChange(key)}
+                style={{
+                  padding: '4px 12px', borderRadius: 4, border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600,
+                  background: platform === key ? cfg.color : 'transparent',
+                  color: platform === key ? 'white' : '#666'
+                }}
+              >
+                {cfg.label}
+                {statusMap[key]?.monitoring && <span style={{ marginLeft: 4, fontSize: 10 }}>●</span>}
+              </button>
+            ))}
           </div>
 
           {/* Launch / Relaunch Button */}
@@ -238,10 +242,26 @@ export default function DashboardPage({ sources, platform, onPlatformChange, wec
             )}
           </div>
 
+          {/* Sender Filter Banner */}
+          {senderFilter && (
+            <div style={{
+              padding: '6px 16px', background: (highlightColor || '#3b82f6') + '15',
+              borderLeft: `3px solid ${highlightColor || '#3b82f6'}`,
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              fontSize: 13, borderRadius: 4, margin: '0 0 8px'
+            }}>
+              <span>筛选：<b>{senderFilter}</b> 的会话记录</span>
+              <button onClick={() => { setSenderFilter(null); setHighlightColor(null) }}
+                style={{ border: 'none', background: 'none', cursor: 'pointer', fontSize: 14, color: '#999' }}>✕</button>
+            </div>
+          )}
+
           {/* Message Log Table */}
           <MessageLog
             messages={messages}
             onViewDetail={(msg) => setDetailMsg(msg)}
+            senderFilter={senderFilter}
+            highlightColor={highlightColor}
           />
         </div>
 
@@ -251,6 +271,8 @@ export default function DashboardPage({ sources, platform, onPlatformChange, wec
             todayNew={todos.todayNew}
             historicalPending={todos.historicalPending}
             onToggle={toggleTodo}
+            onSenderFilter={(sender, color) => { setSenderFilter(sender); setHighlightColor(color) }}
+            activeSender={senderFilter}
             today={new Date().toISOString().split('T')[0]}
           />
         </div>

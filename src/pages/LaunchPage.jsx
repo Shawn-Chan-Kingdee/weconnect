@@ -1,11 +1,17 @@
 import React, { useState } from 'react'
 
+const PLATFORM_CONFIG = {
+  wechat:    { label: '微信网页版', color: '#07C160', short: '微信' },
+  yunzhijia: { label: '云之家',     color: '#1677FF', short: '云之家' },
+  feishu:    { label: '飞书',       color: '#3370FF', short: '飞书' }
+}
+
 export default function LaunchPage({ onLaunch, status, platform, onPlatformChange, onSkipToSettings }) {
   const [launching, setLaunching] = useState(false)
   const [message, setMessage] = useState('')
 
-  const isYzj = platform === 'yunzhijia'
-  const platformLabel = isYzj ? '云之家' : '微信网页版'
+  const cfg = PLATFORM_CONFIG[platform] || PLATFORM_CONFIG.wechat
+  const platformLabel = cfg.label
 
   const handleLaunch = async () => {
     setLaunching(true)
@@ -17,18 +23,31 @@ export default function LaunchPage({ onLaunch, status, platform, onPlatformChang
     }
   }
 
+  const loginHint = platform === 'yunzhijia'
+    ? '请在弹出的浏览器中登录云之家账号'
+    : platform === 'feishu'
+    ? '请在弹出的浏览器中登录飞书账号'
+    : '请打开手机微信，扫描浏览器中显示的二维码'
+
+  const waitingMsg = platform === 'yunzhijia'
+    ? '请在云之家浏览器中登录...'
+    : platform === 'feishu'
+    ? '请在飞书浏览器中登录...'
+    : '请在手机上扫描二维码登录...'
+
   return (
     <div className="launch-page">
       <div className="launch-container">
         <div className="launch-logo">
           <svg width="80" height="80" viewBox="0 0 80 80" fill="none">
-            <rect width="80" height="80" rx="20" fill={isYzj ? '#1677FF' : '#07C160'}/>
+            <rect width="80" height="80" rx="20" fill={cfg.color}/>
             <path d="M28 30C28 26 31 23 35 23H45C49 23 52 26 52 30V38C52 42 49 45 45 45H42L36 51V45H35C31 45 28 42 28 38V30Z" fill="white"/>
-            {!isYzj && <>
-              <circle cx="37" cy="34" r="2" fill="#07C160"/>
-              <circle cx="43" cy="34" r="2" fill="#07C160"/>
+            {platform === 'wechat' && <>
+              <circle cx="37" cy="34" r="2" fill={cfg.color}/>
+              <circle cx="43" cy="34" r="2" fill={cfg.color}/>
             </>}
-            {isYzj && <text x="36" y="38" fill="#1677FF" fontSize="12" fontWeight="bold" textAnchor="middle">Y</text>}
+            {platform === 'yunzhijia' && <text x="36" y="38" fill={cfg.color} fontSize="12" fontWeight="bold" textAnchor="middle">Y</text>}
+            {platform === 'feishu' && <text x="36" y="38" fill={cfg.color} fontSize="12" fontWeight="bold" textAnchor="middle">F</text>}
           </svg>
         </div>
 
@@ -36,43 +55,30 @@ export default function LaunchPage({ onLaunch, status, platform, onPlatformChang
         <p className="launch-subtitle">智能消息助手</p>
 
         {/* Platform Selector */}
-        <div className="platform-selector" style={{ display: 'flex', gap: 12, justifyContent: 'center', margin: '20px 0' }}>
-          <button
-            className={`platform-btn ${platform === 'wechat' ? 'active' : ''}`}
-            onClick={() => onPlatformChange('wechat')}
-            style={{
-              padding: '8px 20px',
-              borderRadius: 20,
-              border: platform === 'wechat' ? '2px solid #07C160' : '2px solid #ddd',
-              background: platform === 'wechat' ? '#07C160' : 'white',
-              color: platform === 'wechat' ? 'white' : '#666',
-              cursor: 'pointer',
-              fontWeight: 600,
-              fontSize: 14
-            }}
-          >
-            微信网页版
-          </button>
-          <button
-            className={`platform-btn ${platform === 'yunzhijia' ? 'active' : ''}`}
-            onClick={() => onPlatformChange('yunzhijia')}
-            style={{
-              padding: '8px 20px',
-              borderRadius: 20,
-              border: platform === 'yunzhijia' ? '2px solid #1677FF' : '2px solid #ddd',
-              background: platform === 'yunzhijia' ? '#1677FF' : 'white',
-              color: platform === 'yunzhijia' ? 'white' : '#666',
-              cursor: 'pointer',
-              fontWeight: 600,
-              fontSize: 14
-            }}
-          >
-            云之家
-          </button>
+        <div className="platform-selector" style={{ display: 'flex', gap: 12, justifyContent: 'center', margin: '20px 0', flexWrap: 'wrap' }}>
+          {Object.entries(PLATFORM_CONFIG).map(([key, pcfg]) => (
+            <button
+              key={key}
+              className={`platform-btn ${platform === key ? 'active' : ''}`}
+              onClick={() => onPlatformChange(key)}
+              style={{
+                padding: '8px 20px',
+                borderRadius: 20,
+                border: platform === key ? `2px solid ${pcfg.color}` : '2px solid #ddd',
+                background: platform === key ? pcfg.color : 'white',
+                color: platform === key ? 'white' : '#666',
+                cursor: 'pointer',
+                fontWeight: 600,
+                fontSize: 14
+              }}
+            >
+              {pcfg.label}
+            </button>
+          ))}
         </div>
 
         {!launching ? (
-          <button className="launch-btn" onClick={handleLaunch} style={{ background: isYzj ? '#1677FF' : undefined }}>
+          <button className="launch-btn" onClick={handleLaunch} style={{ background: cfg.color }}>
             <span className="launch-btn-icon">▶</span>
             启动{platformLabel}
           </button>
@@ -82,13 +88,9 @@ export default function LaunchPage({ onLaunch, status, platform, onPlatformChang
               <>
                 <div className="launch-spinner"></div>
                 <p className="launch-message">
-                  {message || (isYzj ? '请在云之家浏览器中登录...' : '请在手机上扫描二维码登录...')}
+                  {message || waitingMsg}
                 </p>
-                <p className="launch-hint">
-                  {isYzj
-                    ? '请在弹出的浏览器中登录云之家账号'
-                    : '请打开手机微信，扫描浏览器中显示的二维码'}
-                </p>
+                <p className="launch-hint">{loginHint}</p>
               </>
             ) : (
               <>
@@ -107,7 +109,7 @@ export default function LaunchPage({ onLaunch, status, platform, onPlatformChang
       </div>
 
       <footer className="launch-footer">
-        <p>WeConnect v1.1 · 本地运行 · 数据安全 · 支持微信 & 云之家</p>
+        <p>WeConnect v1.2 · 本地运行 · 数据安全 · 支持微信 & 云之家 & 飞书</p>
       </footer>
     </div>
   )

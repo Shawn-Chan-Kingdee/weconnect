@@ -692,6 +692,8 @@ input, select, textarea { font-family: inherit; }
 }
 
 .msg-row:hover { background: #f9fafb; }
+.msg-row.sender-highlight { font-weight: 500; }
+.msg-row.sender-highlight .msg-sender { color: var(--primary); }
 
 .msg-sender { font-weight: 600; color: var(--text); }
 .msg-time { color: var(--text-light); font-size: 12px; white-space: nowrap; }
@@ -781,6 +783,8 @@ input, select, textarea { font-family: inherit; }
 }
 .todo-item:hover { background: #f3f4f6; }
 .todo-item.completed { opacity: 0.5; }
+.todo-item.active-filter { box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.3); }
+.todo-sender-tag { display: block; margin-bottom: 2px; }
 
 .todo-toggle {
   width: 22px; height: 22px;

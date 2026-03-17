@@ -2,12 +2,16 @@ import React from 'react'
 
 const CATEGORY_COLORS = {
   '日常沟通': '#8b95a5',
-  '业务咨询': '#3b82f6',
-  '事项跟进': '#f59e0b',
-  '新事项登记': '#10b981'
+  '售前咨询': '#3b82f6',
+  '项目实施': '#6366f1',
+  '问题跟踪': '#ef4444',
+  '商务报价': '#f59e0b',
+  '操作咨询': '#06b6d4',
+  '消息记录': '#8b95a5',
+  '待办事项': '#10b981'
 }
 
-export default function MessageLog({ messages, onViewDetail }) {
+export default function MessageLog({ messages, onViewDetail, senderFilter, highlightColor }) {
   if (!messages || messages.length === 0) {
     return (
       <div className="message-log-empty">
@@ -32,8 +36,14 @@ export default function MessageLog({ messages, onViewDetail }) {
           </tr>
         </thead>
         <tbody>
-          {messages.map(msg => (
-            <tr key={msg.id} className="msg-row">
+          {messages.map(msg => {
+            const isHighlighted = senderFilter && msg.sender === senderFilter
+            return (
+            <tr
+              key={msg.id}
+              className={`msg-row ${isHighlighted ? 'sender-highlight' : ''}`}
+              style={isHighlighted ? { backgroundColor: (highlightColor || '#e0f2fe') + '20' } : {}}
+            >
               <td className="msg-sender">{msg.sender}</td>
               <td className="msg-time">{formatTime(msg.senderTime)}</td>
               <td
@@ -63,7 +73,8 @@ export default function MessageLog({ messages, onViewDetail }) {
                 {msg.hasTodo ? '📋' : '-'}
               </td>
             </tr>
-          ))}
+            )
+          })}
         </tbody>
       </table>
     </div>
